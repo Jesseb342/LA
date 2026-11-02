@@ -441,7 +441,6 @@ jobs:
       # ================================================
 
       - name: Detect game title ID and select shader profile
-        env:
         shell: bash
         run: |
           set -euo pipefail
