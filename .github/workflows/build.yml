@@ -12,11 +12,6 @@ on:
         options:
           - "iPhone 15 or older (BC fallback)"
           - "iPhone 15 Pro/Pro Max or newer (standard)"
-      profile_id:
-        description: "Optional nxnative profile ID override (leave blank for automatic detection)"
-        required: false
-        type: string
-        default: ""
 
 permissions:
   contents: read
@@ -439,12 +434,14 @@ jobs:
           test -s "$WORK/prod.keys"
 
       # ================================================
-      # DETECT TITLE ID / SELECT SHADER PROFILE
+      # DETECT BASE TITLE ID
+      # NxNative performs profile lookup itself. If no
+      # profile exists, it creates a survey and provisional
+      # profile from the supplied NSPs before building.
       # ================================================
 
       - name: Detect game title ID and select shader profile
         env:
-          PROFILE_OVERRIDE: ${{ inputs.profile_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -547,42 +544,10 @@ jobs:
           PY
           )"
 
-          PROFILE_ID="${PROFILE_OVERRIDE:-$DETECTED_ID}"
-          PROFILE_ID="$(echo "$PROFILE_ID" | tr '[:lower:]' '[:upper:]')"
-
-          if [[ ! "$PROFILE_ID" =~ ^[0-9A-F]{16}$ ]]; then
-            echo "::error::Profile ID must be exactly 16 hexadecimal characters."
-            exit 1
-          fi
-
           echo "Detected base title ID: $DETECTED_ID"
-          echo "Shader profile ID: $PROFILE_ID"
+          echo "NxNative will select an existing profile or generate a survey and provisional profile automatically."
 
-          echo "DM_GAME=$PROFILE_ID" >> "$GITHUB_ENV"
           echo "DETECTED_TITLE_ID=$DETECTED_ID" >> "$GITHUB_ENV"
-
-      # ================================================
-      # SHADER TOOLCHAIN
-      # ================================================
-
-      - name: Update shader toolchain lock and header
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Preparing shader toolchain for profile $DM_GAME"
-
-          CHAIN_SCRIPT="$(
-            find . -name dmsh_chain.py -type f -print -quit
-          )"
-
-          if [[ -z "$CHAIN_SCRIPT" ]]; then
-            echo "::error::Could not find dmsh_chain.py"
-            exit 1
-          fi
-
-          python "$CHAIN_SCRIPT" --update-lock
-          python "$CHAIN_SCRIPT" --header
 
       # ================================================
       # BUILD UNSIGNED IPA
@@ -632,7 +597,6 @@ jobs:
         if: always()
         env:
           DEVICE: ${{ inputs.device }}
-          PROFILE_OVERRIDE: ${{ inputs.profile_id }}
           BUILD_STATUS: ${{ job.status }}
         shell: bash
         run: |
@@ -652,9 +616,8 @@ jobs:
             echo "-----------------"
             echo "Status: $BUILD_STATUS"
             echo "Device: $DEVICE"
-            echo "Profile override: ${PROFILE_OVERRIDE:-Automatic}"
+            echo "Profile selection: Automatic (nxnative profile lookup / survey fallback)"
             echo "Detected title ID: ${DETECTED_TITLE_ID:-Not detected}"
-            echo "Shader profile: ${DM_GAME:-Not detected}"
             echo "Runner OS: $RUNNER_OS"
             echo "Runner architecture: $(uname -m)"
             echo "Date: $(date -u)"
@@ -749,7 +712,7 @@ jobs:
           if [[ -d "$GAME_DIR" ]]; then
 
             find "$GAME_DIR" -type d \
-              \( -name logs -o -name '*_survey' \) \
+              \( -name logs -o -name '*_survey' -o -name profile \) \
               -print0 |
             while IFS= read -r -d '' dir; do
 
