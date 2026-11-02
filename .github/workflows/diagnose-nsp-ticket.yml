@@ -113,7 +113,7 @@ jobs:
                       )
                       if name_offset >= len(strings):
                           continue
-                      end = strings.find(b"\\0", name_offset)
+                      end = strings.find(bytes([0]), name_offset)
                       if end < 0:
                           continue
                       name = strings[name_offset:end].decode(
