@@ -1,0 +1,198 @@
+name: NxNative - Base NSP Ticket Diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-base-nsp:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Install RAR extractor
+        run: brew install unar
+
+      - name: Download base game
+        env:
+          GAME_URL: ${{ secrets.Game_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GAME_URL:-}" ]]; then
+            echo "::error::Game_URL secret is empty."
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/nsp-ticket-check"
+          curl --fail --location --show-error --retry 3 \
+            --connect-timeout 30 \
+            --output "$RUNNER_TEMP/nsp-ticket-check/game.download" \
+            "$GAME_URL"
+
+          test -s "$RUNNER_TEMP/nsp-ticket-check/game.download"
+          echo "Base game download completed."
+          ls -lh "$RUNNER_TEMP/nsp-ticket-check/game.download"
+          file "$RUNNER_TEMP/nsp-ticket-check/game.download"
+
+      - name: Extract archive if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="$RUNNER_TEMP/nsp-ticket-check"
+          INPUT="$ROOT/game.download"
+          PACKAGES="$ROOT/packages"
+          mkdir -p "$PACKAGES"
+
+          SIGNATURE="$(head -c 8 "$INPUT" || true)"
+
+          if [[ "$SIGNATURE" == "Rar!"* ]]; then
+            unar -o "$PACKAGES" "$INPUT"
+          elif [[ "$(head -c 4 "$INPUT")" == "PFS0" ]]; then
+            cp "$INPUT" "$PACKAGES/base.nsp"
+          else
+            echo "::error::Download is neither a direct PFS0 NSP nor a recognized RAR archive."
+            exit 1
+          fi
+
+          find "$PACKAGES" -type f -iname '*.nsp' -print
+
+          if ! find "$PACKAGES" -type f -iname '*.nsp' -print -quit | grep -q .; then
+            echo "::error::No NSP package found in the base-game download."
+            exit 1
+          fi
+
+      - name: Inspect NSP ticket metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - "$RUNNER_TEMP/nsp-ticket-check/packages" <<'PY'
+          import struct
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          expected = "01002E7016C46000000000000000000E"
+
+          def inspect(path):
+              print()
+              print("=" * 64)
+              print(f"PACKAGE: {path.name}")
+              print(f"SIZE: {path.stat().st_size:,} bytes")
+
+              with path.open("rb") as f:
+                  header = f.read(16)
+                  if len(header) != 16 or header[:4] != b"PFS0":
+                      print("RESULT: Not a valid PFS0 NSP.")
+                      return
+
+                  count, string_size = struct.unpack_from("<II", header, 4)
+                  if count > 100000 or string_size > 100000000:
+                      print("RESULT: Implausible PFS0 directory values.")
+                      return
+
+                  entries_blob = f.read(count * 0x18)
+                  strings = f.read(string_size)
+                  if len(entries_blob) != count * 0x18:
+                      print("RESULT: Truncated PFS0 entry table.")
+                      return
+
+                  data_start = 0x10 + count * 0x18 + string_size
+                  tickets = []
+                  ncas = []
+
+                  for i in range(count):
+                      pos = i * 0x18
+                      offset, size, name_offset, _ = struct.unpack_from(
+                          "<QQII", entries_blob, pos
+                      )
+                      if name_offset >= len(strings):
+                          continue
+                      end = strings.find(b"\\0", name_offset)
+                      if end < 0:
+                          continue
+                      name = strings[name_offset:end].decode(
+                          "utf-8", errors="replace"
+                      )
+                      if name.lower().endswith(".tik"):
+                          tickets.append((name, data_start + offset, size))
+                      if name.lower().endswith(".nca"):
+                          ncas.append(name)
+
+                  print(f"PFS0 entries: {count}")
+                  print(f"NCA files: {len(ncas)}")
+                  print(f"Ticket files: {len(tickets)}")
+
+                  if not tickets:
+                      print("RESULT: NO .tik TICKET FOUND in this NSP.")
+                      return
+
+                  for name, ticket_offset, ticket_size in tickets:
+                      print(f"Ticket file: {name}")
+                      if ticket_size < 0x2B0:
+                          print("  RESULT: Ticket is shorter than expected.")
+                          continue
+
+                      f.seek(ticket_offset)
+                      ticket = f.read(0x2C0)
+                      if len(ticket) < 0x2B0:
+                          print("  RESULT: Ticket data is truncated.")
+                          continue
+
+                      common_flag = ticket[0x281]
+                      rights_id = ticket[0x2A0:0x2B0].hex().upper()
+
+                      print(
+                          "  Ticket type: " +
+                          ("COMMON (nx_extract can read it)" if common_flag == 0
+                           else f"PERSONALIZED / NON-COMMON (flag 0x{common_flag:02X}; nx_extract skips it)")
+                      )
+                      print(f"  Rights ID: {rights_id}")
+                      print(
+                          "  Expected missing Rights ID match: " +
+                          ("YES" if rights_id == expected else "NO")
+                      )
+                      print("  Title-key bytes: NOT DISPLAYED")
+
+                      if common_flag == 0 and rights_id == expected:
+                          print("  DIAGNOSTIC: Ticket metadata is consistent with the missing Rights ID.")
+                      elif common_flag != 0:
+                          print("  DIAGNOSTIC: nx_extract will ignore this non-common ticket.")
+                      else:
+                          print("  DIAGNOSTIC: Ticket Rights ID does not match the missing Rights ID.")
+
+                  print()
+                  print("NCA filenames (names only; no key material):")
+                  for name in ncas:
+                      print(f"  {name}")
+
+          packages = sorted(root.rglob("*.nsp")) + sorted(root.rglob("*.NSP"))
+          if not packages:
+              raise SystemExit("No NSP files available for inspection.")
+
+          for package in packages:
+              inspect(package)
+
+          print()
+          print("Expected missing Rights ID from the build log:")
+          print(expected)
+          print("No title keys or prod.keys contents were printed.")
+          PY
+
+      - name: Upload diagnostic report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Base-NSP-Ticket-Diagnostic
+          path: ${{ runner.temp }}/nsp-ticket-check/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Clean up downloaded game
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/nsp-ticket-check"
