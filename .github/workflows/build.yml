@@ -611,20 +611,20 @@ jobs:
           path = Path("scripts/build_ipa_from_nsp.py")
           source = path.read_text()
 
-          old = """    PROG.stage('iOS shaders')
-    if provisional:
-        PROG.set(step='chain header')
-        run([py, repo / 'dm/gfx/tools/dmsh_chain.py', '--header'], logs / 'dmsh_chain.log', env=env)   # the profile's chain version header (dmsh_build checks it)
-    chain = re.search(r'#define DMSH_CHAIN "(.*)"', g.table('dmsh_chain.h').read_text()).group(1)
-"""
+                    old = """    PROG.stage('iOS shaders')
+              if provisional:
+                  PROG.set(step='chain header')
+                  run([py, repo / 'dm/gfx/tools/dmsh_chain.py', '--header'], logs / 'dmsh_chain.log', env=env)   # the profile's chain version header (dmsh_build checks it)
+              chain = re.search(r'#define DMSH_CHAIN "(.*)"', g.table('dmsh_chain.h').read_text()).group(1)
+          """
 
-          new = """    PROG.stage('iOS shaders')
-    PROG.set(step='toolchain lock')
-    run([py, repo / 'dm/gfx/tools/dmsh_chain.py', '--update-lock'], logs / 'dmsh_chain_lock.log', env=env)
-    PROG.set(step='chain header')
-    run([py, repo / 'dm/gfx/tools/dmsh_chain.py', '--header'], logs / 'dmsh_chain.log', env=env)
-    chain = re.search(r'#define DMSH_CHAIN "(.*)"', g.table('dmsh_chain.h').read_text()).group(1)
-"""
+                    new = """    PROG.stage('iOS shaders')
+              PROG.set(step='toolchain lock')
+              run([py, repo / 'dm/gfx/tools/dmsh_chain.py', '--update-lock'], logs / 'dmsh_chain_lock.log', env=env)
+              PROG.set(step='chain header')
+              run([py, repo / 'dm/gfx/tools/dmsh_chain.py', '--header'], logs / 'dmsh_chain.log', env=env)
+              chain = re.search(r'#define DMSH_CHAIN "(.*)"', g.table('dmsh_chain.h').read_text()).group(1)
+          """
 
           if old not in source:
               raise SystemExit(
