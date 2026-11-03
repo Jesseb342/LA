@@ -19,6 +19,7 @@ on:
         default: "Base game + update + DLC"
         options:
           - "Base game only"
+          - "Base game + update (no DLC)"
           - "Base game + DLC (no update)"
           - "Base game + update + DLC"
 
@@ -214,6 +215,10 @@ jobs:
           case "${CONTENT_SELECTION:-}" in
             "Base game only")
               INCLUDE_UPDATE=false
+              INCLUDE_DLC=false
+              ;;
+            "Base game + update (no DLC)")
+              INCLUDE_UPDATE=true
               INCLUDE_DLC=false
               ;;
             "Base game + DLC (no update)")
