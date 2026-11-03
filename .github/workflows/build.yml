@@ -68,7 +68,7 @@ jobs:
           source = path.read_text()
           anchor = "        dm_backtrace(regs[29]);"
           diagnostic = """        LOG("[break-diag] x0(reason)=%#llx x1(ptr)=%#llx x2(size)=%#llx", regs[0], regs[1], regs[2]);
-                  LOG("[break-diag] lr=%#llx fp=%#llx sp=%#llx", regs[30], regs[29], regs[31]);
+                  LOG("[break-diag] lr=%#llx fp=%#llx saved-reg-slot31=%#llx", regs[30], regs[29], regs[31]);
                   if (mm && mm->symtab && mm->strtab) {
                       uint64_t lr_off = (uint64_t)((uint8_t *)regs[30] - mm->base);
                       const Elf64_Sym *lr_sym = NULL, *svc_sym = NULL;
