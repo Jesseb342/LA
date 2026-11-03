@@ -94,7 +94,50 @@ jobs:
           echo "Generated isolated x86_64 libvpx host configuration:"
           grep -E '^#define (VPX_ARCH_|HAVE_NEON|HAVE_SSE|CONFIG_VP9_DECODER)' "$VPX_DIR/config-x86_64/vpx_config.h"
 
-          grep -q '^#define VPX_ARCH_X86_64 1
+          grep -q 'VPX_ARCH_X86_64 1' "$VPX_DIR/config-x86_64/vpx_config.h"
+          grep -q 'VPX_ARCH_ARM 0' "$VPX_DIR/config-x86_64/vpx_config.h"
+          grep -q 'HAVE_NEON 0' "$VPX_DIR/config-x86_64/vpx_config.h"
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("dm/host/Makefile")
+          source = path.read_text()
+
+          old = """VPX=../third_party/libvpx
+          VPX_SRC=$(sort $(shell find $(VPX) -name '*.c'))
+          VPX_OBJ=$(patsubst $(VPX)/%.c,gen/vpx/%.o,$(VPX_SRC))
+          VPX_LIB=gen/vpx/libvpx.a
+          gen/vpx/%.o: $(VPX)/%.c $(wildcard $(VPX)/config/*.h)
+          \t@mkdir -p $(dir $@)
+          \tclang -O2 -g -I$(VPX) -I$(VPX)/config -c $< -o $@
+          """
+
+          new = """VPX=../third_party/libvpx
+          VPX_CONFIG=$(VPX)/config
+          ifeq ($(shell uname -m),x86_64)
+          VPX_CONFIG=$(VPX)/config-x86_64
+          VPX_SRC=$(sort $(shell find $(VPX) -name '*.c' ! -path '*/arm/*' ! -path '*/neon/*'))
+          else
+          VPX_SRC=$(sort $(shell find $(VPX) -name '*.c'))
+          endif
+          VPX_OBJ=$(patsubst $(VPX)/%.c,gen/vpx/%.o,$(VPX_SRC))
+          VPX_LIB=gen/vpx/libvpx.a
+          gen/vpx/%.o: $(VPX)/%.c $(wildcard $(VPX_CONFIG)/*.h) $(wildcard $(VPX)/config/*.h)
+          \t@mkdir -p $(dir $@)
+          \tclang -O2 -g -I$(VPX_CONFIG) -I$(VPX) -I$(VPX)/config -c $< -o $@
+          """
+
+          if old not in source:
+              raise SystemExit(
+                  "Could not find the expected libvpx host Makefile block; "
+                  "refusing to patch an unknown NxNative source version."
+              )
+
+          path.write_text(source.replace(old, new, 1))
+          print("Patched dm/host/Makefile: Intel host uses x86_64 config and excludes ARM-only sources.")
+          PY
+
       # Record the actual host GPU exposed to the BC-fallback build.
       - name: Inspect Mac runner Metal hardware (BC fallback)
         if: inputs.device == 'iPhone 15 or older (BC fallback)'
