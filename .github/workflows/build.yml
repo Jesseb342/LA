@@ -73,7 +73,7 @@ jobs:
                   LOG("[break-diag] callee-saved x19-x24=%#llx %#llx %#llx %#llx %#llx %#llx", regs[19], regs[20], regs[21], regs[22], regs[23], regs[24]);
                   LOG("[break-diag] callee-saved x25-x28=%#llx %#llx %#llx %#llx", regs[25], regs[26], regs[27], regs[28]);
                   if (regs[29] >= 0x1000) {
-                      uint64_t frame_words[20];
+                      uint64_t frame_words[32];
                       memcpy(frame_words, (const void *)(uintptr_t)(regs[29] - 0x80), sizeof frame_words);
                       LOG("[break-diag] stack fp-0x80: %#llx %#llx %#llx %#llx %#llx", frame_words[0], frame_words[1], frame_words[2], frame_words[3], frame_words[4]);
                       LOG("[break-diag] stack fp-0x58: %#llx %#llx %#llx %#llx %#llx", frame_words[5], frame_words[6], frame_words[7], frame_words[8], frame_words[9]);
