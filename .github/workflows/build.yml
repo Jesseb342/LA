@@ -151,9 +151,9 @@ jobs:
                           (!best || sym->st_value > best->st_value)) best = sym;
                   }
               }
-              if (best) fprintf(stderr, " %s%s%s=%s+%#llx", tag, *tag ? "=" : "",
-                                m->name, m->strtab + best->st_name, offset - best->st_value);
-              else fprintf(stderr, " %s%s%s+%#llx", tag, *tag ? "=" : "", m->name, offset);
+              if (best) fprintf(stderr, " %s%s%s=%s+%#llx [module offset %#llx]", tag, *tag ? "=" : "",
+                                m->name, m->strtab + best->st_name, offset - best->st_value, offset);
+              else fprintf(stderr, " %s%s%s+%#llx [module offset %#llx]", tag, *tag ? "=" : "", m->name, offset, offset);
           }"""
           if source.count(old) != 1:
               raise SystemExit("Expected crash.c module-address formatter exactly once; refusing to patch.")
