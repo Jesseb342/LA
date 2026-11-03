@@ -71,6 +71,11 @@ jobs:
             exit 1
           fi
 
+          # libvpx's x86_64 configure requires an x86 assembler.
+          brew install nasm yasm
+          command -v nasm
+          command -v yasm
+
           git clone --depth 1 --branch v1.17.0 https://github.com/webmproject/libvpx.git "$VPX_SOURCE"
           mkdir -p "$VPX_BUILD" "$VPX_DIR/config-x86_64"
           cd "$VPX_BUILD"
