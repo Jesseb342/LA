@@ -28,8 +28,9 @@ permissions:
 
 jobs:
   build:
-    # Both build paths run on GitHub-hosted Apple Silicon macOS.
-    runs-on: macos-latest
+    # The BC-fallback test uses Intel macOS with an x86_64 libvpx config;
+    # the standard path stays on Apple Silicon.
+    runs-on: ${{ inputs.device == 'iPhone 15 or older (BC fallback)' && 'macos-26-intel' || 'macos-latest' }}
     timeout-minutes: 360
 
     steps:
@@ -51,6 +52,55 @@ jobs:
         with:
           repository: seedds/nxnative
           ref: main
+
+      # libvpx's checked-in config is ARM64-only. Generate matching x86_64
+      # dispatch/config headers for the Intel host build so ARM NEON code is
+      # not selected or compiled on the x86_64 runner.
+      - name: Generate x86_64 libvpx config (BC fallback)
+        if: inputs.device == 'iPhone 15 or older (BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VPX_DIR="$GITHUB_WORKSPACE/dm/third_party/libvpx"
+          VPX_BUILD="$RUNNER_TEMP/libvpx-x86_64-config"
+
+          if ! grep -q 'VERSION_STRING_NOSP "v1.17.0"' "$VPX_DIR/config/vpx_version.h"; then
+            echo "::error::Vendored libvpx is not v1.17.0; refusing to generate mismatched config headers."
+            exit 1
+          fi
+
+          git clone --depth 1 --branch v1.17.0 https://github.com/webmproject/libvpx.git "$RUNNER_TEMP/libvpx-v1.17.0"
+          mkdir -p "$VPX_BUILD"
+          cd "$VPX_BUILD"
+
+          "$RUNNER_TEMP/libvpx-v1.17.0/configure" \
+            --target=x86_64-darwin24-gcc \
+            --disable-vp8 \
+            --enable-vp9-decoder \
+            --disable-vp9-encoder \
+            --disable-examples \
+            --disable-tools \
+            --disable-docs \
+            --disable-unit-tests \
+            --disable-runtime-cpu-detect \
+            --disable-asm \
+            --disable-neon-dotprod \
+            --disable-neon-i8mm \
+            --disable-sve \
+            --disable-sve2 \
+            --disable-webm-io \
+            --disable-libyuv \
+            --disable-install-docs \
+            --disable-install-bins
+
+          for header in vpx_config.h vpx_version.h vp9_rtcd.h vpx_dsp_rtcd.h vpx_scale_rtcd.h; do
+            test -s "$VPX_BUILD/$header"
+            cp "$VPX_BUILD/$header" "$VPX_DIR/config/$header"
+          done
+
+          echo "Generated x86_64 libvpx v1.17.0 configuration:"
+          grep -E '^#define (VPX_ARCH_|HAVE_NEON|HAVE_SSE|CONFIG_VP9_DECODER)' "$VPX_DIR/config/vpx_config.h"
 
       # Record the actual host GPU exposed to the BC-fallback build.
       - name: Inspect Mac runner Metal hardware (BC fallback)
