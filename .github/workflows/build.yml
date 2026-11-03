@@ -69,6 +69,18 @@ jobs:
           anchor = "        dm_backtrace(regs[29]);"
           diagnostic = """        LOG("[break-diag] x0(reason)=%#llx x1(ptr)=%#llx x2(size)=%#llx", regs[0], regs[1], regs[2]);
                   LOG("[break-diag] lr=%#llx fp=%#llx sp=%#llx", regs[30], regs[29], regs[31]);
+                  if (mm && mm->symtab && mm->strtab) {
+                      uint64_t lr_off = (uint64_t)((uint8_t *)regs[30] - mm->base);
+                      const Elf64_Sym *lr_sym = NULL, *svc_sym = NULL;
+                      for (unsigned si = 1; si < mm->nsym; si++) {
+                          const Elf64_Sym *sym = &mm->symtab[si];
+                          if (!sym->st_shndx) continue;
+                          if (sym->st_value <= lr_off && (!lr_sym || sym->st_value > lr_sym->st_value)) lr_sym = sym;
+                          if (sym->st_value <= orig_addr && (!svc_sym || sym->st_value > svc_sym->st_value)) svc_sym = sym;
+                      }
+                      if (lr_sym) LOG("[break-diag] LR symbol=%s+%#llx (offset %#llx)", mm->strtab + lr_sym->st_name, lr_off - lr_sym->st_value, lr_off);
+                      if (svc_sym) LOG("[break-diag] SVC symbol=%s+%#llx (offset %#llx)", mm->strtab + svc_sym->st_name, orig_addr - svc_sym->st_value, orig_addr);
+                  }
           """
 
           if source.count(anchor) != 1:
