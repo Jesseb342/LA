@@ -104,9 +104,12 @@ jobs:
           grep -q 'HAVE_NEON 0' "$VPX_DIR/config-x86_64/vpx_config.h"
 
           python - <<'PY'
+          import os
           from pathlib import Path
 
-          path = Path("dm/host/Makefile")
+          # The libvpx configure step above changes into VPX_BUILD.
+          # Resolve the repository Makefile from the workspace, not cwd.
+          path = Path(os.environ["GITHUB_WORKSPACE"]) / "dm/host/Makefile"
           source = path.read_text()
 
           old = """VPX=../third_party/libvpx
