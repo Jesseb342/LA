@@ -165,6 +165,64 @@ jobs:
           print("Added symbol names to guest backtrace frames.")
           PY
 
+      - name: Add targeted SDK allocator-entry observation
+        if: inputs.device == 'iPhone 15 or older (BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from pathlib import Path
+
+          # Reserve observation ID 22 for the SDK allocator entry callback.
+          path = Path("dm/host/dm.h")
+          source = path.read_text()
+          old = "       OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)\n       OBS_MAX = 22 };"
+          new = "       OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)\n       OBS_SDK_ALLOC_INIT = 22,                                  // Goose Game: capture StandardAllocator::Initialize arguments\n       OBS_MAX = 23 };"
+          if source.count(old) != 1:
+              raise SystemExit("Expected observation enum block exactly once; refusing to patch dm.h.")
+          path.write_text(source.replace(old, new, 1))
+
+          # Register a read-only callback before guest startup begins.
+          path = Path("dm/host/main.c")
+          source = path.read_text()
+          fn_anchor = "static void guest_main(void) {"
+          callback = """static void sdk_allocator_init_observe(const uint64_t *regs) {
+              LOG("[allocator-entry] this=%#llx memory=%#llx size=%#llx bool=%#llx",
+                  regs[0], regs[1], regs[2], regs[3]);
+              LOG("[allocator-entry] x4-x8=%#llx %#llx %#llx %#llx %#llx",
+                  regs[4], regs[5], regs[6], regs[7], regs[8]);
+          }
+
+          """
+          if source.count(fn_anchor) != 1:
+              raise SystemExit("Expected guest_main definition exactly once; refusing to patch main.c.")
+          source = source.replace(fn_anchor, callback + fn_anchor, 1)
+          load_anchor = "    load_modules(argv[1], names, n);"
+          load_new = load_anchor + "\n    gate_obs_set(OBS_SDK_ALLOC_INIT, sdk_allocator_init_observe);"
+          if source.count(load_anchor) != 1:
+              raise SystemExit("Expected load_modules call exactly once; refusing to patch main.c.")
+          path.write_text(source.replace(load_anchor, load_new, 1))
+
+          # Add a build-checked observation at the SDK function entry. The symbolized
+          # backtrace located StandardAllocator::Initialize at 0x2e7600 + 0xd0.
+          path = Path("dm/tools/patch_nso.py")
+          source = path.read_text()
+          old = "obs = list(OBS.get(BUILD_ID, []))"
+          new = """obs = list(OBS.get(BUILD_ID, []))
+          if NAME == "sdk":
+              allocator_entry = 0x2e7600
+              if allocator_entry not in starts:
+                  raise SystemExit(f"SDK allocator entry {allocator_entry:#x} is not a recognized function start")
+              original = struct.unpack_from('<I', IMG, allocator_entry)[0]
+              obs.append((allocator_entry, 22, f'{original:08x}',
+                          "Goose Game: capture StandardAllocator::Initialize arguments at function entry"))"""
+          if source.count(old) != 1:
+              raise SystemExit("Expected observation-table insertion point exactly once; refusing to patch patch_nso.py.")
+          path.write_text(source.replace(old, new, 1))
+          print("Installed guarded SDK allocator-entry observation at sdk+0x2e7600.")
+          PY
+
       # ================================================
       # ENVIRONMENT
       # ================================================
