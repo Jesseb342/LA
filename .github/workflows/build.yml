@@ -79,6 +79,29 @@ jobs:
                       LOG("[break-diag] stack fp-0x30: %#llx %#llx %#llx %#llx %#llx", frame_words[10], frame_words[11], frame_words[12], frame_words[13], frame_words[14]);
                       LOG("[break-diag] stack fp-0x08: %#llx %#llx %#llx %#llx %#llx", frame_words[15], frame_words[16], frame_words[17], frame_words[18], frame_words[19]);
                   }
+                  // Search saved guest registers and nearby stack words for pointers
+                  // to printable strings in loaded modules (possible SDK assertions).
+                  if (regs[29] >= 0x1000) {
+                      uint64_t scan_words[32];
+                      memcpy(scan_words, (const void *)(uintptr_t)(regs[29] - 0x80), sizeof scan_words);
+                      for (unsigned ci = 0; ci < 63; ci++) {
+                          uint64_t candidate = ci < 31 ? regs[ci] : scan_words[ci - 31];
+                          module_t *sm = module_of((const void *)(uintptr_t)candidate);
+                          if (!sm || candidate < (uint64_t)(uintptr_t)sm->base ||
+                              candidate >= (uint64_t)(uintptr_t)sm->base + sm->size) continue;
+                          const unsigned char *sp = (const unsigned char *)(uintptr_t)candidate;
+                          char preview[97]; unsigned si = 0;
+                          while (si < sizeof(preview) - 1 &&
+                                 candidate + si < (uint64_t)(uintptr_t)sm->base + sm->size &&
+                                 sp[si] >= 0x20 && sp[si] <= 0x7e) {
+                              preview[si] = (char)sp[si]; si++;
+                          }
+                          if (si >= 8) {
+                              preview[si] = 0;
+                              LOG("[break-diag] possible assertion string from %s: %s", sm->name, preview);
+                          }
+                      }
+                  }
                   if (mm && mm->symtab && mm->strtab) {
                       uint64_t lr_off = (uint64_t)((uint8_t *)regs[30] - mm->base);
                       const Elf64_Sym *lr_sym = NULL, *svc_sym = NULL;
