@@ -1,6 +1,6 @@
 name: NxNative - Base NSP Ticket Diagnostic
 
-on:
+'on':
   workflow_dispatch:
 
 permissions:
