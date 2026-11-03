@@ -178,7 +178,8 @@ jobs:
           path = Path("dm/host/dm.h")
           source = path.read_text()
           old = "       OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)\n       OBS_MAX = 22 };"
-          new = "       OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)\n       OBS_SDK_ALLOC_INIT = 22,                                  // Goose Game: capture StandardAllocator::Initialize arguments\n       OBS_MAX = 23 };"
+          new = "       OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)\n       OBS_SDK_ALLOC_INIT = 22,                                  // Goose Game: capture StandardAllocator::Initialize arguments\n       OBS_SDK_ALLOC_CALL = 23,                                   // Goose Game: capture arguments immediately before allocator call
+       OBS_MAX = 24 };"
           if source.count(old) != 1:
               raise SystemExit("Expected observation enum block exactly once; refusing to patch dm.h.")
           path.write_text(source.replace(old, new, 1))
@@ -194,33 +195,100 @@ jobs:
                   regs[4], regs[5], regs[6], regs[7], regs[8]);
           }
 
+          static void sdk_allocator_call_observe(const uint64_t *regs) {
+              LOG("[allocator-call] x0-x3=%#llx %#llx %#llx %#llx",
+                  regs[0], regs[1], regs[2], regs[3]);
+              LOG("[allocator-call] x4-x8=%#llx %#llx %#llx %#llx %#llx",
+                  regs[4], regs[5], regs[6], regs[7], regs[8]);
+          }
+
           """
           if source.count(fn_anchor) != 1:
               raise SystemExit("Expected guest_main definition exactly once; refusing to patch main.c.")
           source = source.replace(fn_anchor, callback + fn_anchor, 1)
           load_anchor = "    load_modules(argv[1], names, n);"
-          load_new = load_anchor + "\n    gate_obs_set(OBS_SDK_ALLOC_INIT, sdk_allocator_init_observe);"
+          load_new = load_anchor + "\n    gate_obs_set(OBS_SDK_ALLOC_INIT, sdk_allocator_init_observe);\n    gate_obs_set(OBS_SDK_ALLOC_CALL, sdk_allocator_call_observe);"
           if source.count(load_anchor) != 1:
               raise SystemExit("Expected load_modules call exactly once; refusing to patch main.c.")
           path.write_text(source.replace(load_anchor, load_new, 1))
 
-          # Add a build-checked observation at the SDK function entry. The symbolized
-          # backtrace located StandardAllocator::Initialize at 0x2e7600 + 0xd0.
+          # Add a build-checked entry observation and a post-instruction caller
+          # observation. The backtrace return address is main+0x17ffc60, so the
+          # BL is at +0x17ffc5c. Observe the preceding instruction AFTER it runs.
           path = Path("dm/tools/patch_nso.py")
           source = path.read_text()
           old = "obs = list(OBS.get(BUILD_ID, []))"
           new = """obs = list(OBS.get(BUILD_ID, []))
+          obs_after = []
           if NAME == "sdk":
               allocator_entry = 0x2e7600
               if allocator_entry not in starts:
                   raise SystemExit(f"SDK allocator entry {allocator_entry:#x} is not a recognized function start")
               original = struct.unpack_from('<I', IMG, allocator_entry)[0]
               obs.append((allocator_entry, 22, f'{original:08x}',
-                          "Goose Game: capture StandardAllocator::Initialize arguments at function entry"))"""
+                          "Goose Game: capture StandardAllocator::Initialize arguments at function entry"))
+          if NAME == "main":
+              allocator_call = 0x17ffc5c
+              call_ins = dis(struct.unpack_from('<I', IMG, allocator_call)[0], allocator_call)
+              if call_ins.mnemonic != "bl":
+                  raise SystemExit(f"Expected allocator call BL at main+{allocator_call:#x}, found {call_ins.mnemonic} {call_ins.op_str}")
+              observe_off = allocator_call - 4
+              original = struct.unpack_from('<I', IMG, observe_off)[0]
+              obs_after.append((observe_off, 23, f'{original:08x}',
+                                "Goose Game: capture allocator arguments after final caller instruction and before BL"))
+              print(f"[allocator-callsite] BL main+{allocator_call:#x}: {call_ins.op_str}")
+              for a in range(max(0, allocator_call - 0x40), allocator_call + 4, 4):
+                  ins = dis(struct.unpack_from('<I', IMG, a)[0], a)
+                  print(f"[allocator-callsite] main+{a:#x}: {ins.mnemonic} {ins.op_str}")"""
           if source.count(old) != 1:
               raise SystemExit("Expected observation-table insertion point exactly once; refusing to patch patch_nso.py.")
           path.write_text(source.replace(old, new, 1))
-          print("Installed guarded SDK allocator-entry observation at sdk+0x2e7600.")
+
+          # This gate executes a safe instruction first, then captures the
+          # resulting registers before the following BL.
+          path = Path("dm/tools/patch_nso.py")
+          source = path.read_text()
+          marker = "# ---- Exclusive windows ----"
+          after_fn = """def site_obs_after(off, oid, word):
+              ins = dis(word, off)
+              assert ins.mnemonic not in ('adr', 'adrp', 'b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') and not ins.mnemonic.startswith('b.') \\
+                  and not (ins.mnemonic.startswith('ldr') and '[' not in ins.op_str) and not has18(ins), \\
+                  f'post-instruction observation cannot relocate {off:#x} {ins.mnemonic} {ins.op_str}'
+              start = here()
+              emit(word)
+              emit(STP_PRE(29, 30, 31, -16))
+              emit_gate_call()
+              emit(BLR(30))
+              ret = here()
+              emit(LDP_POST(29, 30, 31, 16))
+              emit(B(here(), off + 4))
+              gates.append((ret, 'obs', oid, off))
+              return start
+
+          """
+          if source.count(marker) != 1:
+              raise SystemExit("Expected exclusive-window insertion point exactly once; refusing to patch patch_nso.py.")
+          source = source.replace(marker, after_fn + marker, 1)
+
+          marker = "# ---- Frame step in whole vsyncs"
+          process_after = """for off, oid, ow, why in obs_after:
+              w = struct.unpack_from('<I', IMG, off)[0]
+              assert f'{w:08x}' == ow, f'post-observation original instruction mismatch {off:#x}: {w:08x}'
+              ins = dis(w, off)
+              assert ins.mnemonic not in ('adr', 'adrp', 'b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') and not ins.mnemonic.startswith('b.') \\
+                  and not (ins.mnemonic.startswith('ldr') and '[' not in ins.op_str) and not has18(ins), \\
+                  f'post-observation instruction cannot be relocated {off:#x} {ins.mnemonic} {ins.op_str}'
+              assert scratch_dead(off + 4), f'post-observation x9-x17 are live before next call at {off:#x}'
+              assert off < TEXT_END and off not in kinds and not any(lo <= off < hi for wseg in windows for lo, hi in [(wseg[0].address, wseg[-1].address + 4)]), f'post-observation conflicts with a rewrite site {off:#x}'
+              put_branch(off, site_obs_after(off, oid, w))
+              stat('obs')
+
+          """
+          if source.count(marker) != 1:
+              raise SystemExit("Expected frame-step insertion point exactly once; refusing to patch patch_nso.py.")
+          source = source.replace(marker, process_after + marker, 1)
+          path.write_text(source)
+          print("Installed guarded allocator caller observation at main+0x17ffc58.")
           PY
 
       # ================================================
