@@ -178,7 +178,7 @@ jobs:
           path = Path("dm/host/dm.h")
           source = path.read_text()
           old = "       OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)\n       OBS_MAX = 22 };"
-          new = "       OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)\n       OBS_SDK_ALLOC_INIT = 22,                                  // Goose Game: capture StandardAllocator::Initialize arguments\n       OBS_SDK_ALLOC_CALL = 23,                                   // Goose Game: capture arguments immediately before allocator call\n       OBS_MAX = 24 };"
+          new = "       OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)\n       OBS_SDK_ALLOC_INIT = 22,                                  // Goose Game: capture StandardAllocator::Initialize arguments\n       OBS_SDK_ALLOC_CALL = 23,                                   // Goose Game: capture arguments immediately before allocator call\n       OBS_ALLOC_HELPER = 24,                                      // Goose Game: capture allocator decision helper arguments\n       OBS_MAX = 25 };"
           if source.count(old) != 1:
               raise SystemExit("Expected observation enum block exactly once; refusing to patch dm.h.")
           path.write_text(source.replace(old, new, 1))
@@ -201,12 +201,19 @@ jobs:
                   regs[4], regs[5], regs[6], regs[7], regs[8]);
           }
 
+          static void sdk_alloc_helper_observe(const uint64_t *regs) {
+              LOG("[alloc-helper] x0-x8=%#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx",
+                  regs[0], regs[1], regs[2], regs[3], regs[4], regs[5], regs[6], regs[7], regs[8]);
+              LOG("[alloc-helper] x19-x24=%#llx %#llx %#llx %#llx %#llx %#llx",
+                  regs[19], regs[20], regs[21], regs[22], regs[23], regs[24]);
+          }
+
           """
           if source.count(fn_anchor) != 1:
               raise SystemExit("Expected guest_main definition exactly once; refusing to patch main.c.")
           source = source.replace(fn_anchor, callback + fn_anchor, 1)
           load_anchor = "    load_modules(argv[1], names, n);"
-          load_new = load_anchor + "\n    gate_obs_set(OBS_SDK_ALLOC_INIT, sdk_allocator_init_observe);\n    gate_obs_set(OBS_SDK_ALLOC_CALL, sdk_allocator_call_observe);"
+          load_new = load_anchor + "\n    gate_obs_set(OBS_SDK_ALLOC_INIT, sdk_allocator_init_observe);\n    gate_obs_set(OBS_SDK_ALLOC_CALL, sdk_allocator_call_observe);\n    gate_obs_set(OBS_ALLOC_HELPER, sdk_alloc_helper_observe);"
           if source.count(load_anchor) != 1:
               raise SystemExit("Expected load_modules call exactly once; refusing to patch main.c.")
           path.write_text(source.replace(load_anchor, load_new, 1))
@@ -227,6 +234,16 @@ jobs:
               obs.append((allocator_entry, 22, f'{original:08x}',
                           "Goose Game: capture StandardAllocator::Initialize arguments at function entry"))
           if NAME == "main":
+              helper_entry = 0x28cd240
+              if helper_entry not in starts:
+                  raise SystemExit(f"Allocator decision helper {helper_entry:#x} is not a recognized function start")
+              original = struct.unpack_from('<I', IMG, helper_entry)[0]
+              obs.append((helper_entry, 24, f'{original:08x}',
+                          "Goose Game: capture arguments entering the allocator null-memory decision helper"))
+              print(f"[alloc-helper] entry main+{helper_entry:#x}")
+              for a in range(helper_entry, helper_entry + 0x80, 4):
+                  ins = dis(struct.unpack_from('<I', IMG, a)[0], a)
+                  print(f"[alloc-helper] main+{a:#x}: {ins.mnemonic} {ins.op_str}")
               allocator_call = 0x17ffc5c
               call_ins = dis(struct.unpack_from('<I', IMG, allocator_call)[0], allocator_call)
               if call_ins.mnemonic != "bl":
