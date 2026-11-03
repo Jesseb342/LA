@@ -68,6 +68,7 @@ jobs:
           source = path.read_text()
           anchor = "        dm_backtrace(regs[29]);"
           diagnostic = """        LOG("[break-diag] x0(reason)=%#llx x1(ptr)=%#llx x2(size)=%#llx", regs[0], regs[1], regs[2]);
+                  LOG("[break-diag] caller args x3-x8=%#llx %#llx %#llx %#llx %#llx %#llx", regs[3], regs[4], regs[5], regs[6], regs[7], regs[8]);
                   LOG("[break-diag] lr=%#llx fp=%#llx saved-reg-slot31=%#llx", regs[30], regs[29], regs[31]);
                   LOG("[break-diag] callee-saved x19-x24=%#llx %#llx %#llx %#llx %#llx %#llx", regs[19], regs[20], regs[21], regs[22], regs[23], regs[24]);
                   LOG("[break-diag] callee-saved x25-x28=%#llx %#llx %#llx %#llx", regs[25], regs[26], regs[27], regs[28]);
@@ -78,6 +79,9 @@ jobs:
                       LOG("[break-diag] stack fp-0x58: %#llx %#llx %#llx %#llx %#llx", frame_words[5], frame_words[6], frame_words[7], frame_words[8], frame_words[9]);
                       LOG("[break-diag] stack fp-0x30: %#llx %#llx %#llx %#llx %#llx", frame_words[10], frame_words[11], frame_words[12], frame_words[13], frame_words[14]);
                       LOG("[break-diag] stack fp-0x08: %#llx %#llx %#llx %#llx %#llx", frame_words[15], frame_words[16], frame_words[17], frame_words[18], frame_words[19]);
+                      LOG("[break-diag] stack fp+0x18: %#llx %#llx %#llx %#llx", frame_words[20], frame_words[21], frame_words[22], frame_words[23]);
+                      LOG("[break-diag] stack fp+0x38: %#llx %#llx %#llx %#llx", frame_words[24], frame_words[25], frame_words[26], frame_words[27]);
+                      LOG("[break-diag] stack fp+0x58: %#llx %#llx %#llx %#llx", frame_words[28], frame_words[29], frame_words[30], frame_words[31]);
                   }
                   // Search saved guest registers and nearby stack words for pointers
                   // to printable strings in loaded modules (possible SDK assertions).
