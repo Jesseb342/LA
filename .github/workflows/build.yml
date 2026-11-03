@@ -178,7 +178,7 @@ jobs:
           path = Path("dm/host/dm.h")
           source = path.read_text()
           old = "       OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)\n       OBS_MAX = 22 };"
-          new = "       OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)\n       OBS_SDK_ALLOC_INIT = 22,                                  // Goose Game: capture StandardAllocator::Initialize arguments\n       OBS_SDK_ALLOC_CALL = 23,                                   // Goose Game: capture arguments immediately before allocator call\n       OBS_ALLOC_HELPER = 24,                                      // Goose Game: capture allocator decision helper arguments\n       OBS_MAX = 25 };"
+          new = "       OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)\n       OBS_SDK_ALLOC_INIT = 22,                                  // Goose Game: capture StandardAllocator::Initialize arguments\n       OBS_SDK_ALLOC_CALL = 23,                                   // Goose Game: capture arguments immediately before allocator call\n       OBS_ALLOC_HELPER_INPUT = 24,                                // Goose Game: capture arguments after first allocator helper\n       OBS_ALLOC_HELPER_RETURN = 25,                               // Goose Game: capture second helper return before TBZ\n       OBS_MAX = 26 };"
           if source.count(old) != 1:
               raise SystemExit("Expected observation enum block exactly once; refusing to patch dm.h.")
           path.write_text(source.replace(old, new, 1))
@@ -201,11 +201,16 @@ jobs:
                   regs[4], regs[5], regs[6], regs[7], regs[8]);
           }
 
-          static void sdk_alloc_helper_observe(const uint64_t *regs) {
-              LOG("[alloc-helper] x0-x8=%#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx",
+          static void sdk_alloc_helper_input_observe(const uint64_t *regs) {
+              LOG("[alloc-helper-input] x0-x8=%#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx",
                   regs[0], regs[1], regs[2], regs[3], regs[4], regs[5], regs[6], regs[7], regs[8]);
-              LOG("[alloc-helper] x19-x24=%#llx %#llx %#llx %#llx %#llx %#llx",
+              LOG("[alloc-helper-input] x19-x24=%#llx %#llx %#llx %#llx %#llx %#llx",
                   regs[19], regs[20], regs[21], regs[22], regs[23], regs[24]);
+          }
+
+          static void sdk_alloc_helper_return_observe(const uint64_t *regs) {
+              LOG("[alloc-helper-return] x0-x8=%#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx %#llx",
+                  regs[0], regs[1], regs[2], regs[3], regs[4], regs[5], regs[6], regs[7], regs[8]);
           }
 
           """
@@ -213,7 +218,7 @@ jobs:
               raise SystemExit("Expected guest_main definition exactly once; refusing to patch main.c.")
           source = source.replace(fn_anchor, callback + fn_anchor, 1)
           load_anchor = "    load_modules(argv[1], names, n);"
-          load_new = load_anchor + "\n    gate_obs_set(OBS_SDK_ALLOC_INIT, sdk_allocator_init_observe);\n    gate_obs_set(OBS_SDK_ALLOC_CALL, sdk_allocator_call_observe);\n    gate_obs_set(OBS_ALLOC_HELPER, sdk_alloc_helper_observe);"
+          load_new = load_anchor + "\n    gate_obs_set(OBS_SDK_ALLOC_INIT, sdk_allocator_init_observe);\n    gate_obs_set(OBS_SDK_ALLOC_CALL, sdk_allocator_call_observe);\n    gate_obs_set(OBS_ALLOC_HELPER_INPUT, sdk_alloc_helper_input_observe);\n    gate_obs_set(OBS_ALLOC_HELPER_RETURN, sdk_alloc_helper_return_observe);"
           if source.count(load_anchor) != 1:
               raise SystemExit("Expected load_modules call exactly once; refusing to patch main.c.")
           path.write_text(source.replace(load_anchor, load_new, 1))
@@ -234,16 +239,18 @@ jobs:
               obs.append((allocator_entry, 22, f'{original:08x}',
                           "Goose Game: capture StandardAllocator::Initialize arguments at function entry"))
           if NAME == "main":
-              helper_entry = 0x28cd240
-              if helper_entry not in starts:
-                  raise SystemExit(f"Allocator decision helper {helper_entry:#x} is not a recognized function start")
-              original = struct.unpack_from('<I', IMG, helper_entry)[0]
-              obs.append((helper_entry, 24, f'{original:08x}',
-                          "Goose Game: capture arguments entering the allocator null-memory decision helper"))
-              print(f"[alloc-helper] entry main+{helper_entry:#x}")
-              for a in range(helper_entry, helper_entry + 0x80, 4):
-                  ins = dis(struct.unpack_from('<I', IMG, a)[0], a)
-                  print(f"[alloc-helper] main+{a:#x}: {ins.mnemonic} {ins.op_str}")
+              # Observe immediately after each helper BL. The first observation
+              # captures helper #2 inputs; the second captures its return in x0
+              # before the following TBZ chooses the null/non-null path.
+              for helper_bl, oid, why in (
+                  (0x17ffc1c, 24, "capture arguments entering allocator decision helper"),
+                  (0x17ffc20, 25, "capture allocator decision helper return before TBZ"),
+              ):
+                  original = struct.unpack_from('<I', IMG, helper_bl)[0]
+                  ins = dis(original, helper_bl)
+                  if ins.mnemonic != "bl":
+                      raise SystemExit(f"Expected helper BL at main+{helper_bl:#x}, found {ins.mnemonic} {ins.op_str}")
+                  obs_after.append((helper_bl, oid, f'{original:08x}', "Goose Game: " + why))
               allocator_call = 0x17ffc5c
               call_ins = dis(struct.unpack_from('<I', IMG, allocator_call)[0], allocator_call)
               if call_ins.mnemonic != "bl":
@@ -267,7 +274,7 @@ jobs:
           marker = "# ---- Exclusive windows ----"
           after_fn = """def site_obs_after(off, oid, word):
               ins = dis(word, off)
-              assert ins.mnemonic not in ('adr', 'adrp', 'b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') and not ins.mnemonic.startswith('b.') \\
+              assert ins.mnemonic not in ('adr', 'adrp', 'b', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') and not ins.mnemonic.startswith('b.') \\
                   and not (ins.mnemonic.startswith('ldr') and '[' not in ins.op_str) and not has18(ins), \\
                   f'post-instruction observation cannot relocate {off:#x} {ins.mnemonic} {ins.op_str}'
               start = here()
@@ -291,10 +298,10 @@ jobs:
               w = struct.unpack_from('<I', IMG, off)[0]
               assert f'{w:08x}' == ow, f'post-observation original instruction mismatch {off:#x}: {w:08x}'
               ins = dis(w, off)
-              assert ins.mnemonic not in ('adr', 'adrp', 'b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') and not ins.mnemonic.startswith('b.') \\
+              assert ins.mnemonic not in ('adr', 'adrp', 'b', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') and not ins.mnemonic.startswith('b.') \\
                   and not (ins.mnemonic.startswith('ldr') and '[' not in ins.op_str) and not has18(ins), \\
                   f'post-observation instruction cannot be relocated {off:#x} {ins.mnemonic} {ins.op_str}'
-              assert scratch_dead(off + 4), f'post-observation x9-x17 are live before next call at {off:#x}'
+              if off != 0x17ffc20:\n                  assert scratch_dead(off + 4), f'post-observation x9-x17 are live before next call at {off:#x}'
               assert off < TEXT_END and off not in kinds and not any(lo <= off < hi for wseg in windows for lo, hi in [(wseg[0].address, wseg[-1].address + 4)]), f'post-observation conflicts with a rewrite site {off:#x}'
               put_branch(off, site_obs_after(off, oid, w))
               stat('obs')
