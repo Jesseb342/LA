@@ -28,7 +28,12 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-latest
+    # The BC-fallback build must execute the game during shader capture. The
+    # standard arm64 hosted runner exposes an Apple Paravirtual Metal device,
+    # which currently fails NxNative's MTLResidencySet initialization.
+    # Test the Intel macOS 26 runner for a different Metal device/backend.
+    # Keep the standard path on the existing Apple Silicon runner.
+    runs-on: ${{ inputs.device == 'iPhone 15 or older (BC fallback)' && 'macos-26-intel' || 'macos-latest' }}
     timeout-minutes: 360
 
     steps:
@@ -50,6 +55,20 @@ jobs:
         with:
           repository: seedds/nxnative
           ref: main
+
+      # Record the actual host GPU exposed to the BC-fallback build.
+      - name: Inspect Intel runner Metal hardware (BC fallback)
+        if: inputs.device == 'iPhone 15 or older (BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== Runner identity ==="
+          uname -a
+          sw_vers
+          echo "=== Display / GPU hardware ==="
+          system_profiler SPDisplaysDataType
+          echo "=== Xcode ==="
+          xcodebuild -version
 
       # Print the Metal residency-set NSError and device/OS capabilities on BC-fallback builds.
       # This is diagnostic-only: it preserves the upstream failure behavior and does not bypass it.
