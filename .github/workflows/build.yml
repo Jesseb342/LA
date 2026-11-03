@@ -1,7 +1,7 @@
 
 name: NxNative - Generic IPA Builder
 
-'on':
+on:
   workflow_dispatch:
     inputs:
       device:
