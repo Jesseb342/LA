@@ -52,6 +52,46 @@ jobs:
           ref: main
 
       # ================================================
+      # DIAGNOSTIC PATCH: LOG SDK FATAL BREAK REGISTERS
+      # ================================================
+
+      - name: Add SDK Break diagnostic logging
+        if: inputs.device == 'iPhone 15 or older (BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("dm/host/hle_svc.c")
+          source = path.read_text()
+
+          old = """        LOG("Break#%d reason=%#llx Result=%#x svc at %s+%#llx", ++nb, regs[0], res, mm ? mm->name : "?", orig_addr);
+          dm_backtrace(regs[29]);
+          if (regs[0] & 0x80000000ull) return 0;   // notification only, can continue
+          _exit(42);
+          """
+
+          new = """        LOG("Break#%d reason=%#llx Result=%#x svc at %s+%#llx", ++nb, regs[0], res, mm ? mm->name : "?", orig_addr);
+          LOG("[break-diag] x0(reason)=%#llx x1(ptr)=%#llx x2(size)=%#llx", regs[0], regs[1], regs[2]);
+          LOG("[break-diag] lr=%#llx fp=%#llx sp=%#llx", regs[30], regs[29], regs[31]);
+          dm_backtrace(regs[29]);
+          if (regs[0] & 0x80000000ull) return 0;   // notification only, can continue
+          _exit(42);
+          """
+
+          if old not in source:
+              raise SystemExit(
+                  "Expected Break handler block was not found; "
+                  "refusing to patch an unknown source version."
+              )
+
+          path.write_text(source.replace(old, new, 1))
+          print("Added Break argument and guest register diagnostics.")
+          PY
+
+      # ================================================
       # ENVIRONMENT
       # ================================================
 
