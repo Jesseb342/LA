@@ -51,6 +51,64 @@ jobs:
           repository: seedds/nxnative
           ref: main
 
+      # Print the Metal residency-set NSError and device/OS capabilities on BC-fallback builds.
+      # This is diagnostic-only: it preserves the upstream failure behavior and does not bypass it.
+      - name: Add Metal residency-set diagnostics (BC fallback)
+        if: inputs.device == 'iPhone 15 or older (BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("dm/gfx/nvn/nvn_mtl.m")
+          source = path.read_text()
+
+          old = '''    g_q = [g_dev newCommandQueue];
+              MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new];
+              rd.initialCapacity = 4096;
+              NSError *re = nil;
+              g_res = [g_dev newResidencySetWithDescriptor:rd error:&re];
+              if (!g_res) MDIE("failed to create the MTLResidencySet");
+          '''
+
+          new = '''    MLOG("Metal device: %s; registryID=%llu; unifiedMemory=%d; maxBufferLength=%llu; recommendedMaxWorkingSetSize=%llu; OS=%s",
+                 g_dev.name.UTF8String,
+                 (unsigned long long)g_dev.registryID,
+                 g_dev.hasUnifiedMemory,
+                 (unsigned long long)g_dev.maxBufferLength,
+                 (unsigned long long)g_dev.recommendedMaxWorkingSetSize,
+                 NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String);
+              g_q = [g_dev newCommandQueue];
+              MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new];
+              rd.initialCapacity = 4096;
+              NSError *re = nil;
+              g_res = [g_dev newResidencySetWithDescriptor:rd error:&re];
+              if (!g_res) {
+                  MLOG("FATAL failed to create the MTLResidencySet");
+                  if (re) {
+                      MLOG("Metal residency-set NSError: domain=%s code=%ld description=%s userInfo=%s",
+                           re.domain.UTF8String, (long)re.code,
+                           re.localizedDescription.UTF8String,
+                           re.userInfo.description.UTF8String);
+                  } else {
+                      MLOG("Metal residency-set NSError was nil");
+                  }
+                  abort();
+              }
+          '''
+
+          if old not in source:
+              raise SystemExit(
+                  "Could not find the expected Metal residency-set initialization block; "
+                  "refusing to patch an unknown NxNative source version."
+              )
+
+          path.write_text(source.replace(old, new, 1))
+          print("Added Metal device/OS and residency-set NSError diagnostics.")
+          PY
+
       # ================================================
       # ENVIRONMENT
       # ================================================
