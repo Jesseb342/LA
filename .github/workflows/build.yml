@@ -77,6 +77,11 @@ jobs:
           command -v yasm
 
           git clone --depth 1 --branch v1.17.0 https://github.com/webmproject/libvpx.git "$VPX_SOURCE"
+
+          # The NxNative vendored snapshot omits the x86 host capability header.
+          # Restore the matching v1.17.0 header needed by vpx/src/vpx_encoder.c.
+          install -m 0644 "$VPX_SOURCE/vpx_ports/x86.h" "$VPX_DIR/vpx_ports/x86.h"
+
           mkdir -p "$VPX_BUILD" "$VPX_DIR/config-x86_64"
           cd "$VPX_BUILD"
 
