@@ -178,8 +178,7 @@ jobs:
           path = Path("dm/host/dm.h")
           source = path.read_text()
           old = "       OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)\n       OBS_MAX = 22 };"
-          new = "       OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)\n       OBS_SDK_ALLOC_INIT = 22,                                  // Goose Game: capture StandardAllocator::Initialize arguments\n       OBS_SDK_ALLOC_CALL = 23,                                   // Goose Game: capture arguments immediately before allocator call
-       OBS_MAX = 24 };"
+          new = "       OBS_UE_MALLOC = 21,                                       // DRAGON QUEST VII Reimagined 1.2.0: Unreal's allocator object just made (hle_uemalloc.c)\n       OBS_SDK_ALLOC_INIT = 22,                                  // Goose Game: capture StandardAllocator::Initialize arguments\n       OBS_SDK_ALLOC_CALL = 23,                                   // Goose Game: capture arguments immediately before allocator call\n       OBS_MAX = 24 };"
           if source.count(old) != 1:
               raise SystemExit("Expected observation enum block exactly once; refusing to patch dm.h.")
           path.write_text(source.replace(old, new, 1))
