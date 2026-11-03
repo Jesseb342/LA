@@ -74,31 +74,30 @@ jobs:
           '''
 
           new = '''    MLOG("Metal device: %s; registryID=%llu; unifiedMemory=%d; maxBufferLength=%llu; recommendedMaxWorkingSetSize=%llu; OS=%s",
-                 g_dev.name.UTF8String,
-                 (unsigned long long)g_dev.registryID,
-                 g_dev.hasUnifiedMemory,
-                 (unsigned long long)g_dev.maxBufferLength,
-                 (unsigned long long)g_dev.recommendedMaxWorkingSetSize,
-                 NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String);
-              g_q = [g_dev newCommandQueue];
-              MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new];
-              rd.initialCapacity = 4096;
-              NSError *re = nil;
-              g_res = [g_dev newResidencySetWithDescriptor:rd error:&re];
-              if (!g_res) {
-                  MLOG("FATAL failed to create the MTLResidencySet");
-                  if (re) {
-                      MLOG("Metal residency-set NSError: domain=%s code=%ld description=%s userInfo=%s",
-                           re.domain.UTF8String, (long)re.code,
-                           re.localizedDescription.UTF8String,
-                           re.userInfo.description.UTF8String);
-                  } else {
-                      MLOG("Metal residency-set NSError was nil");
-                  }
-                  abort();
-              }
+         g_dev.name.UTF8String,
+         (unsigned long long)g_dev.registryID,
+         g_dev.hasUnifiedMemory,
+         (unsigned long long)g_dev.maxBufferLength,
+         (unsigned long long)g_dev.recommendedMaxWorkingSetSize,
+         NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String);
+    g_q = [g_dev newCommandQueue];
+    MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new];
+    rd.initialCapacity = 4096;
+    NSError *re = nil;
+    g_res = [g_dev newResidencySetWithDescriptor:rd error:&re];
+    if (!g_res) {
+        MLOG("FATAL failed to create the MTLResidencySet");
+        if (re) {
+            MLOG("Metal residency-set NSError: domain=%s code=%ld description=%s userInfo=%s",
+                 re.domain.UTF8String, (long)re.code,
+                 re.localizedDescription.UTF8String,
+                 re.userInfo.description.UTF8String);
+        } else {
+            MLOG("Metal residency-set NSError was nil");
+        }
+        abort();
+    }
           '''
-
           if old not in source:
               raise SystemExit(
                   "Could not find the expected Metal residency-set initialization block; "
