@@ -239,18 +239,9 @@ jobs:
               obs.append((allocator_entry, 22, f'{original:08x}',
                           "Goose Game: capture StandardAllocator::Initialize arguments at function entry"))
           if NAME == "main":
-              # Observe immediately after each helper BL. The first observation
-              # captures helper #2 inputs; the second captures its return in x0
-              # before the following TBZ chooses the null/non-null path.
-              for helper_bl, oid, why in (
-                  (0x17ffc1c, 24, "capture arguments entering allocator decision helper"),
-                  (0x17ffc20, 25, "capture allocator decision helper return before TBZ"),
-              ):
-                  original = struct.unpack_from('<I', IMG, helper_bl)[0]
-                  ins = dis(original, helper_bl)
-                  if ins.mnemonic != "bl":
-                      raise SystemExit(f"Expected helper BL at main+{helper_bl:#x}, found {ins.mnemonic} {ins.op_str}")
-                  obs_after.append((helper_bl, oid, f'{original:08x}', "Goose Game: " + why))
+              # Do not relocate helper BL instructions into a trampoline: their
+              # PC-relative targets would change. Keep only the known-safe
+              # post-instruction observation before the allocator call.
               allocator_call = 0x17ffc5c
               call_ins = dis(struct.unpack_from('<I', IMG, allocator_call)[0], allocator_call)
               if call_ins.mnemonic != "bl":
