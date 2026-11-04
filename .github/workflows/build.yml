@@ -31,7 +31,7 @@ jobs:
     # Both NxNative paths require an ARM64 macOS host; the BC fallback
     # changes texture handling, not the host CPU architecture.
     # Use the standard Apple Silicon macOS runner for public-repository builds.
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 360
 
     steps:
