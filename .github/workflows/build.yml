@@ -711,6 +711,49 @@ jobs:
           PY
 
       # ================================================
+      # HANDLE UNITY COMPUTE KERNELS WITHOUT uniqueVariants
+      # Some Unity 2021.3 serialized ComputeShader kernels do not expose
+      # this field. Skip only those kernels and report them, rather than
+      # aborting the entire shader scan. Runtime capture can still collect
+      # shaders that the game actually uses.
+      # ================================================
+
+      - name: Handle Unity compute kernels without uniqueVariants
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("dm/gfx/tools/shader_split.py")
+          source = path.read_text()
+
+          old = """                    for i, u in enumerate(k['uniqueVariants']):
+                        where = f'{base}#{o["m_Name"]}#{k["name"]}.{i}'
+                        out.extend((where, st, ctl, cd) for st, ctl, cd in unity_program(u['code'], where, 'cs'))
+          """
+
+          new = """                    unique_variants = k.get('uniqueVariants')
+                    if unique_variants is None:
+                        print(f'[YELLOW] {base}#{o.get("m_Name", "?")}#{k.get("name", "?")}: ComputeShader kernel has no uniqueVariants field; skipping this kernel', flush=True)
+                        continue
+                    for i, u in enumerate(unique_variants):
+                        where = f'{base}#{o["m_Name"]}#{k["name"]}.{i}'
+                        out.extend((where, st, ctl, cd) for st, ctl, cd in unity_program(u['code'], where, 'cs'))
+          """
+
+          if old not in source:
+              raise SystemExit(
+                  "Could not find the expected unity_compute uniqueVariants loop; "
+                  "refusing to patch an unknown shader_split.py version."
+              )
+
+          path.write_text(source.replace(old, new, 1))
+          print("Patched Unity compute shader scanning to skip kernels without uniqueVariants.")
+          PY
+
+      # ================================================
       # BUILD UNSIGNED IPA
       # ================================================
 
