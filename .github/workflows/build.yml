@@ -151,6 +151,46 @@ jobs:
           print("Installed guarded recognition for padded, unframed x18 pointer tail calls.")
           PY
 
+      # Treat code before the first unwind entry as one function, not one-instruction functions.
+      # FINAL FANTASY RESONANCE has no FDE until main+0x6a75d4; its byte jump table at
+      # main+0x219234 needs the preceding adr x18 to be visible to the br x18 recognizer.
+      - name: Backport pre-FDE function boundary recognition (BC fallback)
+        if: inputs.device == 'iPhone 15 or older (BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("dm/tools/patch_nso.py")
+          source = path.read_text()
+
+          old = """def func_of(a):
+              i = bisect.bisect_right(starts, a) - 1
+              return (starts[i], starts[i + 1] if i + 1 < len(starts) else TEXT_END) if i >= 0 else (a, a + 4)
+          """
+
+          new = '''def func_of(a):
+              """Include code before the first FDE in one function, starting after the preceding data block."""
+              i = bisect.bisect_right(starts, a) - 1
+              if i >= 0:
+                  return (starts[i], starts[i + 1] if i + 1 < len(starts) else TEXT_END)
+              return (max((e for s, e in DATA_BLOCKS if e <= a), default=0), starts[0]) if starts else (a, a + 4)
+          '''
+
+          if source.count(old) != 1:
+              raise SystemExit(
+                  "Could not find the expected original func_of implementation; "
+                  "refusing to patch an unknown BC-fallback rewriter."
+              )
+
+          source = source.replace(old, new, 1)
+          path.write_text(source)
+          compile(source, str(path), "exec")
+          print("Installed pre-FDE function boundary recognition for BC fallback.")
+          PY
+
       # Record the actual host GPU exposed to the BC-fallback build.
       - name: Inspect Mac runner Metal hardware (BC fallback)
         if: inputs.device == 'iPhone 15 or older (BC fallback)'
