@@ -104,133 +104,6 @@ jobs:
           print("Installed guarded recognition for padded, unframed x18 pointer tail calls.")
           PY
 
-      # Treat code before the first unwind entry as one function, not one-instruction functions.
-      # FINAL FANTASY RESONANCE has no FDE until main+0x6a75d4; its byte jump table at
-      # main+0x219234 needs the preceding adr x18 to be visible to the br x18 recognizer.
-      - name: Backport pre-FDE function boundary recognition (BC fallback)
-        if: inputs.device == 'iPhone 15 or older (BC fallback)' && env.DETECTED_TITLE_ID != '0100606026F12000'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path("dm/tools/patch_nso.py")
-          source = path.read_text()
-
-          old = """def func_of(a):
-              i = bisect.bisect_right(starts, a) - 1
-              return (starts[i], starts[i + 1] if i + 1 < len(starts) else TEXT_END) if i >= 0 else (a, a + 4)
-          """
-
-          new = '''def func_of(a):
-              """Include code before the first FDE in one function, starting after the preceding data block."""
-              i = bisect.bisect_right(starts, a) - 1
-              if i >= 0:
-                  return (starts[i], starts[i + 1] if i + 1 < len(starts) else TEXT_END)
-              return (max((e for s, e in DATA_BLOCKS if e <= a), default=0), starts[0]) if starts else (a, a + 4)
-          '''
-
-          if source.count(old) != 1:
-              raise SystemExit(
-                  "Could not find the expected original func_of implementation; "
-                  "refusing to patch an unknown BC-fallback rewriter."
-              )
-
-          source = source.replace(old, new, 1)
-          path.write_text(source)
-          compile(source, str(path), "exec")
-          print("Installed pre-FDE function boundary recognition for BC fallback.")
-          PY
-
-      # Split very large functions without unwind entries before detailed disassembly.
-      # The first-FDE region in FINAL FANTASY RESONANCE is ~6.6 MB; disassembling it
-      # as one function exhausts memory. Backport upstream's branch-safe piece splitter.
-      - name: Split oversized rewriter functions (BC fallback)
-        if: inputs.device == 'iPhone 15 or older (BC fallback)' && env.DETECTED_TITLE_ID != '0100606026F12000'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path("dm/tools/patch_nso.py")
-          source = path.read_text()
-
-          old = "funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})\n"
-          if source.count(old) != 1:
-              raise SystemExit(
-                  "Could not find the expected function-disassembly loop; "
-                  "refusing to patch an unknown BC-fallback rewriter."
-              )
-
-          splitter = '''# Avoid disassembling very large functions as one Capstone instruction list.
-          # Branch-safe cuts preserve local jump-table/window context.
-          BIG_FN, PIECE, PIECE_B = 0x40000, 0x40000, 0x10000
-          def pieces(fa, fb):
-              """Return branch-safe pieces covering [fa, fb), plus far b/bl edges."""
-              from array import array
-              n = (fb - fa) // 4
-              w = memoryview(bytes(IMG[fa:fa + 4 * n])).cast('I')
-              cross = array('i', bytes(4 * (n + 2))); far = []
-              for i in range(n):
-                  x = w[i]; t = x >> 24
-                  if t == 0x54 and not x & 0x10 or t & 0x7E == 0x34:
-                      d = (x >> 5) & 0x7FFFF; d -= (d & 0x40000) << 1
-                  elif t & 0x7E == 0x36:
-                      d = (x >> 5) & 0x3FFF; d -= (d & 0x2000) << 1
-                  elif t & 0x7C == 0x14:
-                      d = x & 0x3FFFFFF; d -= (d & 0x2000000) << 1
-                      if t & 0x80 or 4 * abs(d) > PIECE_B:
-                          far.append((fa + 4 * i, fa + 4 * (i + d))); continue
-                  else:
-                      continue
-                  lo, hi = max(min(i, i + d), -1), min(max(i, i + d), n)
-                  cross[lo + 1] += 1; cross[hi + 1] -= 1
-              cand, c = [], 0
-              for k in range(n):
-                  c += cross[k]
-                  x = w[k - 1] if k else 0
-                  if k and not c and (x & 0xFFFFFC1F in (0xD65F0000, 0xD61F0000) or x >> 26 == 0x05):
-                      cand.append(k)
-              cuts, start = [], 0
-              while start + PIECE // 4 < n:
-                  j = bisect.bisect_right(cand, start + PIECE // 4) - 1
-                  if j < 0 or cand[j] <= start:
-                      j = bisect.bisect_right(cand, start + PIECE // 4)
-                  if j >= len(cand):
-                      break
-                  start = cand[j]; cuts.append(start)
-              bounds = [0] + cuts + [n]
-              return [(fa + 4 * p, fa + 4 * q) for p, q in zip(bounds, bounds[1:])], far
-
-          funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})
-          if any(fb - fa > BIG_FN for fa, fb in funcs):
-              sites18 = sorted(a for a, (k, _) in kinds.items() if k == 'x18')
-              split = []
-              for fa, fb in funcs:
-                  if fb - fa <= BIG_FN:
-                      split.append((fa, fb)); continue
-                  function_pieces, far_edges = pieces(fa, fb)
-                  split += [
-                      (p, q) for p, q in function_pieces
-                      if bisect.bisect_left(sites18, p) < bisect.bisect_left(sites18, q)
-                  ]
-                  print(
-                      f"Split large function {fa:#x}..{fb:#x} "
-                      f"({(fb-fa)/2**20:.2f} MB) into {len(function_pieces)} branch-safe pieces."
-                  )
-              funcs = split
-          '''
-
-          source = source.replace(old, splitter + "\n", 1)
-          path.write_text(source)
-          compile(source, str(path), "exec")
-          print("Installed upstream branch-safe splitting for oversized rewriter functions.")
-          PY
-
       # Record the actual host GPU exposed to the BC-fallback build.
       - name: Inspect Mac runner Metal hardware (BC fallback)
         if: inputs.device == 'iPhone 15 or older (BC fallback)'
@@ -856,6 +729,133 @@ jobs:
           print("Installed verified upstream SDK function-matching patches for BC fallback.")
           PY
 
+
+      # Treat code before the first unwind entry as one function, not one-instruction functions.
+      # FINAL FANTASY RESONANCE has no FDE until main+0x6a75d4; its byte jump table at
+      # main+0x219234 needs the preceding adr x18 to be visible to the br x18 recognizer.
+      - name: Backport pre-FDE function boundary recognition (BC fallback)
+        if: inputs.device == 'iPhone 15 or older (BC fallback)' && env.DETECTED_TITLE_ID != '0100606026F12000'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("dm/tools/patch_nso.py")
+          source = path.read_text()
+
+          old = """def func_of(a):
+              i = bisect.bisect_right(starts, a) - 1
+              return (starts[i], starts[i + 1] if i + 1 < len(starts) else TEXT_END) if i >= 0 else (a, a + 4)
+          """
+
+          new = '''def func_of(a):
+              """Include code before the first FDE in one function, starting after the preceding data block."""
+              i = bisect.bisect_right(starts, a) - 1
+              if i >= 0:
+                  return (starts[i], starts[i + 1] if i + 1 < len(starts) else TEXT_END)
+              return (max((e for s, e in DATA_BLOCKS if e <= a), default=0), starts[0]) if starts else (a, a + 4)
+          '''
+
+          if source.count(old) != 1:
+              raise SystemExit(
+                  "Could not find the expected original func_of implementation; "
+                  "refusing to patch an unknown BC-fallback rewriter."
+              )
+
+          source = source.replace(old, new, 1)
+          path.write_text(source)
+          compile(source, str(path), "exec")
+          print("Installed pre-FDE function boundary recognition for BC fallback.")
+          PY
+
+      # Split very large functions without unwind entries before detailed disassembly.
+      # The first-FDE region in FINAL FANTASY RESONANCE is ~6.6 MB; disassembling it
+      # as one function exhausts memory. Backport upstream's branch-safe piece splitter.
+      - name: Split oversized rewriter functions (BC fallback)
+        if: inputs.device == 'iPhone 15 or older (BC fallback)' && env.DETECTED_TITLE_ID != '0100606026F12000'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("dm/tools/patch_nso.py")
+          source = path.read_text()
+
+          old = "funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})\n"
+          if source.count(old) != 1:
+              raise SystemExit(
+                  "Could not find the expected function-disassembly loop; "
+                  "refusing to patch an unknown BC-fallback rewriter."
+              )
+
+          splitter = '''# Avoid disassembling very large functions as one Capstone instruction list.
+          # Branch-safe cuts preserve local jump-table/window context.
+          BIG_FN, PIECE, PIECE_B = 0x40000, 0x40000, 0x10000
+          def pieces(fa, fb):
+              """Return branch-safe pieces covering [fa, fb), plus far b/bl edges."""
+              from array import array
+              n = (fb - fa) // 4
+              w = memoryview(bytes(IMG[fa:fa + 4 * n])).cast('I')
+              cross = array('i', bytes(4 * (n + 2))); far = []
+              for i in range(n):
+                  x = w[i]; t = x >> 24
+                  if t == 0x54 and not x & 0x10 or t & 0x7E == 0x34:
+                      d = (x >> 5) & 0x7FFFF; d -= (d & 0x40000) << 1
+                  elif t & 0x7E == 0x36:
+                      d = (x >> 5) & 0x3FFF; d -= (d & 0x2000) << 1
+                  elif t & 0x7C == 0x14:
+                      d = x & 0x3FFFFFF; d -= (d & 0x2000000) << 1
+                      if t & 0x80 or 4 * abs(d) > PIECE_B:
+                          far.append((fa + 4 * i, fa + 4 * (i + d))); continue
+                  else:
+                      continue
+                  lo, hi = max(min(i, i + d), -1), min(max(i, i + d), n)
+                  cross[lo + 1] += 1; cross[hi + 1] -= 1
+              cand, c = [], 0
+              for k in range(n):
+                  c += cross[k]
+                  x = w[k - 1] if k else 0
+                  if k and not c and (x & 0xFFFFFC1F in (0xD65F0000, 0xD61F0000) or x >> 26 == 0x05):
+                      cand.append(k)
+              cuts, start = [], 0
+              while start + PIECE // 4 < n:
+                  j = bisect.bisect_right(cand, start + PIECE // 4) - 1
+                  if j < 0 or cand[j] <= start:
+                      j = bisect.bisect_right(cand, start + PIECE // 4)
+                  if j >= len(cand):
+                      break
+                  start = cand[j]; cuts.append(start)
+              bounds = [0] + cuts + [n]
+              return [(fa + 4 * p, fa + 4 * q) for p, q in zip(bounds, bounds[1:])], far
+
+          funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})
+          if any(fb - fa > BIG_FN for fa, fb in funcs):
+              sites18 = sorted(a for a, (k, _) in kinds.items() if k == 'x18')
+              split = []
+              for fa, fb in funcs:
+                  if fb - fa <= BIG_FN:
+                      split.append((fa, fb)); continue
+                  function_pieces, far_edges = pieces(fa, fb)
+                  split += [
+                      (p, q) for p, q in function_pieces
+                      if bisect.bisect_left(sites18, p) < bisect.bisect_left(sites18, q)
+                  ]
+                  print(
+                      f"Split large function {fa:#x}..{fb:#x} "
+                      f"({(fb-fa)/2**20:.2f} MB) into {len(function_pieces)} branch-safe pieces."
+                  )
+              funcs = split
+          '''
+
+          source = source.replace(old, splitter + "\n", 1)
+          path.write_text(source)
+          compile(source, str(path), "exec")
+          print("Installed upstream branch-safe splitting for oversized rewriter functions.")
+          PY
 
       # Print the Metal residency-set NSError and device/OS capabilities on BC-fallback builds.
       # This is diagnostic-only: it preserves the upstream failure behavior and does not bypass it.
