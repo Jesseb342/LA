@@ -28,9 +28,9 @@ permissions:
 
 jobs:
   build:
-    # The BC-fallback test uses Intel macOS with an x86_64 libvpx config;
-    # the standard path stays on Apple Silicon.
-    runs-on: ${{ inputs.device == 'iPhone 15 or older (BC fallback)' && 'macos-26-intel' || 'macos-latest' }}
+    # Both NxNative paths require an ARM64 macOS host; the BC fallback
+    # changes texture handling, not the host CPU architecture.
+    runs-on: macos-latest
     timeout-minutes: 360
 
     steps:
@@ -52,104 +52,6 @@ jobs:
         with:
           repository: seedds/nxnative
           ref: main
-
-      # The vendored libvpx config is ARM64-only and its ARM NEON C files
-      # cannot be compiled by the Intel host compiler. Generate an isolated
-      # x86_64 config for the host build; leave the shared iOS/arm64 config intact.
-      - name: Prepare x86_64 libvpx host build (BC fallback)
-        if: inputs.device == 'iPhone 15 or older (BC fallback)'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          VPX_DIR="$GITHUB_WORKSPACE/dm/third_party/libvpx"
-          VPX_BUILD="$RUNNER_TEMP/libvpx-x86_64-config"
-          VPX_SOURCE="$RUNNER_TEMP/libvpx-v1.17.0"
-
-          if ! grep -q 'VERSION_STRING_NOSP "v1.17.0"' "$VPX_DIR/config/vpx_version.h"; then
-            echo "::error::Vendored libvpx is not v1.17.0; refusing to generate a mismatched host config."
-            exit 1
-          fi
-
-          # libvpx's x86_64 configure requires an x86 assembler.
-          brew install nasm yasm
-          command -v nasm
-          command -v yasm
-
-          git clone --depth 1 --branch v1.17.0 https://github.com/webmproject/libvpx.git "$VPX_SOURCE"
-
-          # The NxNative vendored snapshot omits the x86 host capability header.
-          # Restore the matching v1.17.0 header needed by vpx/src/vpx_encoder.c.
-          install -m 0644 "$VPX_SOURCE/vpx_ports/x86.h" "$VPX_DIR/vpx_ports/x86.h"
-
-          mkdir -p "$VPX_BUILD" "$VPX_DIR/config-x86_64"
-          cd "$VPX_BUILD"
-
-          "$VPX_SOURCE/configure" \
-            --target=x86_64-darwin24-gcc \
-            --disable-vp8 \
-            --enable-vp9-decoder \
-            --disable-vp9-encoder \
-            --disable-examples \
-            --disable-tools \
-            --disable-docs \
-            --disable-unit-tests \
-            --disable-runtime-cpu-detect \
-            --disable-webm-io \
-            --disable-libyuv
-
-          test -s "$VPX_BUILD/vpx_config.h"
-          cp "$VPX_BUILD/vpx_config.h" "$VPX_DIR/config-x86_64/vpx_config.h"
-
-          echo "Generated isolated x86_64 libvpx host configuration:"
-          grep -E '^#define (VPX_ARCH_|HAVE_NEON|HAVE_SSE|CONFIG_VP9_DECODER)' "$VPX_DIR/config-x86_64/vpx_config.h"
-
-          grep -q 'VPX_ARCH_X86_64 1' "$VPX_DIR/config-x86_64/vpx_config.h"
-          grep -q 'VPX_ARCH_ARM 0' "$VPX_DIR/config-x86_64/vpx_config.h"
-          grep -q 'HAVE_NEON 0' "$VPX_DIR/config-x86_64/vpx_config.h"
-
-          python - <<'PY'
-          import os
-          from pathlib import Path
-
-          # The libvpx configure step above changes into VPX_BUILD.
-          # Resolve the repository Makefile from the workspace, not cwd.
-          path = Path(os.environ["GITHUB_WORKSPACE"]) / "dm/host/Makefile"
-          source = path.read_text()
-
-          old = """VPX=../third_party/libvpx
-          VPX_SRC=$(sort $(shell find $(VPX) -name '*.c'))
-          VPX_OBJ=$(patsubst $(VPX)/%.c,gen/vpx/%.o,$(VPX_SRC))
-          VPX_LIB=gen/vpx/libvpx.a
-          gen/vpx/%.o: $(VPX)/%.c $(wildcard $(VPX)/config/*.h)
-          \t@mkdir -p $(dir $@)
-          \tclang -O2 -g -I$(VPX) -I$(VPX)/config -c $< -o $@
-          """
-
-          new = """VPX=../third_party/libvpx
-          VPX_CONFIG=$(VPX)/config
-          ifeq ($(shell uname -m),x86_64)
-          VPX_CONFIG=$(VPX)/config-x86_64
-          VPX_SRC=$(sort $(shell find $(VPX) -name '*.c' ! -path '*/arm/*' ! -path '*/neon/*'))
-          else
-          VPX_SRC=$(sort $(shell find $(VPX) -name '*.c'))
-          endif
-          VPX_OBJ=$(patsubst $(VPX)/%.c,gen/vpx/%.o,$(VPX_SRC))
-          VPX_LIB=gen/vpx/libvpx.a
-          gen/vpx/%.o: $(VPX)/%.c $(wildcard $(VPX_CONFIG)/*.h) $(wildcard $(VPX)/config/*.h)
-          \t@mkdir -p $(dir $@)
-          \tclang -O2 -g -I$(VPX_CONFIG) -I$(VPX) -I$(VPX)/config -c $< -o $@
-          """
-
-          if old not in source:
-              raise SystemExit(
-                  "Could not find the expected libvpx host Makefile block; "
-                  "refusing to patch an unknown NxNative source version."
-              )
-
-          path.write_text(source.replace(old, new, 1))
-          print("Patched dm/host/Makefile: Intel host uses x86_64 config and excludes ARM-only sources.")
-          PY
 
       # Record the actual host GPU exposed to the BC-fallback build.
       - name: Inspect Mac runner Metal hardware (BC fallback)
