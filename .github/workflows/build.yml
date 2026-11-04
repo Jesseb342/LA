@@ -30,9 +30,8 @@ jobs:
   build:
     # Both NxNative paths require an ARM64 macOS host; the BC fallback
     # changes texture handling, not the host CPU architecture.
-    # The standard M1 hosted VM exposes no usable Metal residency-set device.
-    # Use the M2 larger runner with GPU hardware acceleration for shader capture.
-    runs-on: macos-26-xlarge
+    # Use the standard Apple Silicon macOS runner for public-repository builds.
+    runs-on: macos-latest
     timeout-minutes: 360
 
     steps:
