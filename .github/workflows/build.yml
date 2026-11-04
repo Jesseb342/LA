@@ -54,6 +54,53 @@ jobs:
           repository: seedds/nxnative
           ref: main
 
+      # Backport upstream's verified SDK address-space patches into the older BC-texture fork.
+      # The matcher fingerprints complete SDK functions and asserts original bytes before applying cuts.
+      - name: Add verified SDK memory patches (BC fallback)
+        if: inputs.device == 'iPhone 15 or older (BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          UPSTREAM_COMMIT="777a5f6c618a38cd2d7f795f465466fb56920534"
+          RAW="https://raw.githubusercontent.com/seedds/nxnative/$UPSTREAM_COMMIT/dm/tools"
+
+          curl -fsSL "$RAW/nso_code.py" -o dm/tools/nso_code.py
+          curl -fsSL "$RAW/nso_match.py" -o dm/tools/nso_match.py
+          curl -fsSL "$RAW/sdk_patches.py" -o dm/tools/sdk_patches.py
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("dm/tools/patch_nso.py")
+          source = path.read_text()
+
+          old = """BUILD_ID = d[0x40:0x50].hex()
+          cuts = list(CUTS.get(BUILD_ID, []))
+          """
+
+          new = """BUILD_ID = d[0x40:0x50].hex()
+          cuts = list(CUTS.get(BUILD_ID, []))
+
+          # Apply upstream's SDK-wide address-space workarounds only to SDK modules.
+          # resolve() matches complete function fingerprints and verifies every
+          # original instruction before the existing byte-checked cut loop runs.
+          if NAME == 'sdk':
+              import sdk_patches
+              from nso_match import resolve
+              cuts += resolve(IMG, TEXT_END, sdk_patches.MATCH_CUTS.get('sdk', []), red=False)
+          """
+
+          if source.count(old) != 1:
+              raise SystemExit(
+                  "Could not find the expected SDK cut block in patch_nso.py; "
+                  "refusing to patch an unknown BC-fallback source version."
+              )
+
+          path.write_text(source.replace(old, new, 1))
+          print("Installed verified upstream SDK function-matching patches for BC fallback.")
+          PY
+
       # Record the actual host GPU exposed to the BC-fallback build.
       - name: Inspect Mac runner Metal hardware (BC fallback)
         if: inputs.device == 'iPhone 15 or older (BC fallback)'
