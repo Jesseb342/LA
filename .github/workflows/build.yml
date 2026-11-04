@@ -54,12 +54,674 @@ jobs:
           repository: seedds/nxnative
           ref: main
 
+
+      # Recognize unframed pointer thunks followed by zero trap padding.
+      # Upstream fix for jump-table assertions on indirect tail calls (Moving Out 2 fix).
+      - name: Backport padded tail-call recognition (BC fallback)
+        if: inputs.device == 'iPhone 15 or older (BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("dm/tools/patch_nso.py")
+          source = path.read_text()
+
+          marker = "def tail_call(insl, j):"
+          if source.count(marker) != 1:
+              raise SystemExit(
+                  "Could not find exactly one tail_call function; "
+                  "refusing to patch an unknown BC-fallback rewriter."
+              )
+
+          helper = '''def tail_call_padded(insl, j):
+              """An unframed, straight-line pointer thunk ending in br x18 and zero trap padding."""
+              if j + 1 >= len(insl) or any(p.mnemonic != 'udf' or p.op_str != '#0' for p in insl[j + 1:]): return False
+              if any(b.address != a.address + 4 for a, b in zip(insl, insl[1:])): return False
+              for p in insl[:j]:
+                  if p.mnemonic not in ('mov', 'ldr', 'ldrh', 'ldp', 'add', 'str', 'stp'): return False
+                  if {p.reg_name(r) for r in p.regs_access()[1]} & {'sp', 'wsp', 'fp', 'lr', 'x29', 'w29', 'x30', 'w30'}: return False
+              for p in reversed(insl[:j]):
+                  if not {'x18', 'w18'} & {p.reg_name(r) for r in p.regs_access()[1]}: continue
+                  return p.mnemonic in ('ldr', 'ldp') and bool(re.fullmatch(r'x18, (x\\d+, )?\\[(x\\d+|sp)(, #(0x[0-9a-f]+|\\d+))?\\]', p.op_str))
+              return False
+
+          '''
+          source = source.replace(marker, helper + marker, 1)
+
+          old = "    if j + 1 != len(insl): return False\n"
+          new = "    if j + 1 == len(insl):\n        pass\n    elif tail_call_padded(insl, j):\n        return True\n    else:\n        return False\n"
+          if source.count(old) != 1:
+              raise SystemExit(
+                  "Could not find the expected terminal-tail check; "
+                  "refusing to patch an unknown tail_call implementation."
+              )
+          source = source.replace(old, new, 1)
+
+          path.write_text(source)
+          compile(source, str(path), "exec")
+          print("Installed guarded recognition for padded, unframed x18 pointer tail calls.")
+          PY
+
+      # Record the actual host GPU exposed to the BC-fallback build.
+      - name: Inspect Mac runner Metal hardware (BC fallback)
+        if: inputs.device == 'iPhone 15 or older (BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== Runner identity ==="
+          uname -a
+          sw_vers
+          echo "=== Display / GPU hardware ==="
+          system_profiler SPDisplaysDataType
+          echo "=== Xcode ==="
+          xcodebuild -version
+
+      # Print the Metal residency-set NSError and device/OS capabilities on BC-fallback builds.
+      # This is diagnostic-only: it preserves the upstream failure behavior and does not bypass it.
+      - name: Add Metal residency-set diagnostics (BC fallback)
+        if: inputs.device == 'iPhone 15 or older (BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("dm/gfx/nvn/nvn_mtl.m")
+          source = path.read_text()
+
+          old = '''    g_q = [g_dev newCommandQueue];
+              MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new];
+              rd.initialCapacity = 4096;
+              NSError *re = nil;
+              g_res = [g_dev newResidencySetWithDescriptor:rd error:&re];
+              if (!g_res) MDIE("failed to create the MTLResidencySet");
+          '''
+
+          new = '''    MLOG("Metal device: %s; registryID=%llu; unifiedMemory=%d; maxBufferLength=%llu; recommendedMaxWorkingSetSize=%llu; OS=%s",
+              g_dev.name.UTF8String,
+              (unsigned long long)g_dev.registryID,
+              g_dev.hasUnifiedMemory,
+              (unsigned long long)g_dev.maxBufferLength,
+              (unsigned long long)g_dev.recommendedMaxWorkingSetSize,
+              NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String);
+              g_q = [g_dev newCommandQueue];
+              MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new];
+              rd.initialCapacity = 4096;
+              NSError *re = nil;
+              g_res = [g_dev newResidencySetWithDescriptor:rd error:&re];
+              if (!g_res) {
+                  MLOG("FATAL failed to create the MTLResidencySet");
+                  if (re) {
+                      MLOG("Metal residency-set NSError: domain=%s code=%ld description=%s userInfo=%s",
+                           re.domain.UTF8String, (long)re.code,
+                           re.localizedDescription.UTF8String,
+                           re.userInfo.description.UTF8String);
+                  } else {
+                      MLOG("Metal residency-set NSError was nil");
+                  }
+                  abort();
+              }
+          '''
+          if old not in source:
+              raise SystemExit(
+                  "Could not find the expected Metal residency-set initialization block; "
+                  "refusing to patch an unknown NxNative source version."
+              )
+
+          path.write_text(source.replace(old, new, 1))
+          print("Added Metal device/OS and residency-set NSError diagnostics.")
+          PY
+
+      # ================================================
+      # ENVIRONMENT
+      # ================================================
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          brew install xcodegen zstd spirv-cross unar
+
+          python -m pip install --upgrade pip
+
+          python -m pip install \
+            lz4 'capstone>=5,<6' fonttools backports.zstd
+
+      # ================================================
+      # DOWNLOAD CACHE KEY
+      # ================================================
+
+      - name: Prepare download cache
+        id: cache-key
+        env:
+          GAME_URL: ${{ secrets.Game_URL }}
+          UPDATE_URL: ${{ secrets.Update_URL }}
+          DLC_URL: ${{ secrets.DLC_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import hashlib
+          import os
+
+          urls = [
+              os.environ.get("GAME_URL", "").strip(),
+              os.environ.get("UPDATE_URL", "").strip(),
+              os.environ.get("DLC_URL", "").strip(),
+          ]
+
+          if not urls[0]:
+              raise SystemExit("Game_URL secret is empty.")
+
+          cache_key = hashlib.sha256(
+              "|".join(urls).encode()
+          ).hexdigest()
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"key=nxnative-downloads-{cache_key}\n")
+
+          print("Download cache key prepared.")
+          PY
+
+          mkdir -p "$RUNNER_TEMP/nxnative/download-cache"
+
+      - name: Restore downloaded game files
+        id: download-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/nxnative/download-cache
+          key: ${{ runner.os }}-${{ steps.cache-key.outputs.key }}
+
+      # ================================================
+      # DOWNLOAD GAME / UPDATE / DLC
+      # DECODE BASE64 KEYS
+      # ================================================
+
+      - name: Download game files and decode keys
+        env:
+          GAME_URL: ${{ secrets.Game_URL }}
+          UPDATE_URL: ${{ secrets.Update_URL }}
+          DLC_URL: ${{ secrets.DLC_URL }}
+          KEYS_BASE64: ${{ secrets.Keys_URL }}
+          CONTENT_SELECTION: ${{ inputs.content }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          WORK="$RUNNER_TEMP/nxnative"
+          CACHE="$WORK/download-cache"
+
+          mkdir -p "$WORK" "$CACHE"
+
+          download_file() {
+            local url="$1"
+            local output="$2"
+            local filename
+            local cached
+            local temporary
+
+            filename="$(basename "$output")"
+            cached="$CACHE/$filename"
+            temporary="$output.part"
+
+            if [[ -z "${url:-}" ]]; then
+              echo "::error::Download URL is empty."
+              exit 1
+            fi
+
+            # Reuse cached downloads.
+            if [[ -s "$cached" ]]; then
+              echo "========================================"
+              echo "CACHE HIT: $filename"
+              echo "Reusing cached download."
+              echo "========================================"
+
+              cp "$cached" "$output"
+              file "$output"
+              return
+            fi
+
+            echo "========================================"
+            echo "CACHE MISS: $filename"
+            echo "Starting direct download..."
+            echo "========================================"
+
+            # Direct HTTP/HTTPS download with percentage progress.
+            curl \
+              --fail \
+              --location \
+              --show-error \
+              --progress-bar \
+              --retry 3 \
+              --retry-delay 5 \
+              --connect-timeout 30 \
+              --output "$temporary" \
+              "$url"
+
+            if [[ ! -s "$temporary" ]]; then
+              echo "::error::Downloaded file is empty."
+              exit 1
+            fi
+
+            mv "$temporary" "$output"
+
+            echo "Download completed:"
+            ls -lh "$output"
+            file "$output"
+
+            # Cache successful downloads.
+            cp "$output" "$cached"
+
+            echo "Saved $filename to download cache."
+          }
+
+          # Base game is required.
+          download_file "$GAME_URL" "$WORK/game.download"
+
+          # Include only the content selected at workflow dispatch.
+          # The cache key still uses all three URLs, so existing cached
+          # game/update/DLC downloads remain available across these choices.
+          case "${CONTENT_SELECTION:-}" in
+            "Base game only")
+              INCLUDE_UPDATE=false
+              INCLUDE_DLC=false
+              ;;
+            "Base game + update (no DLC)")
+              INCLUDE_UPDATE=true
+              INCLUDE_DLC=false
+              ;;
+            "Base game + DLC (no update)")
+              INCLUDE_UPDATE=false
+              INCLUDE_DLC=true
+              ;;
+            "Base game + update + DLC")
+              INCLUDE_UPDATE=true
+              INCLUDE_DLC=true
+              ;;
+            *)
+              echo "::error::Unknown content selection: ${CONTENT_SELECTION:-unset}"
+              exit 1
+              ;;
+          esac
+
+          if [[ "$INCLUDE_UPDATE" == true ]]; then
+            if [[ -z "${UPDATE_URL:-}" ]]; then
+              echo "::error::Update was selected, but UPDATE_URL is not configured."
+              exit 1
+            fi
+            download_file "$UPDATE_URL" "$WORK/update.download"
+          else
+            echo "Update excluded by content selection; skipping."
+          fi
+
+          if [[ "$INCLUDE_DLC" == true ]]; then
+            if [[ -z "${DLC_URL:-}" ]]; then
+              echo "::error::DLC was selected, but DLC_URL is not configured."
+              exit 1
+            fi
+            download_file "$DLC_URL" "$WORK/dlc.download"
+          else
+            echo "DLC excluded by content selection; skipping."
+          fi
+
+          # Decode Base64 encryption keys.
+          if [[ -z "${KEYS_BASE64:-}" ]]; then
+            echo "::error::Keys_URL secret is empty."
+            exit 1
+          fi
+
+          echo "Decoding Base64 encryption keys..."
+
+          python - "$WORK/prod.keys" <<'PY'
+          import base64
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          encoded = os.environ["KEYS_BASE64"].strip()
+
+          encoded = re.sub(r"\s+", "", encoded)
+
+          try:
+              decoded = base64.b64decode(
+                  encoded,
+                  validate=True
+              )
+          except Exception as exc:
+              raise SystemExit(
+                  f"Invalid Base64 encryption keys: {exc}"
+              )
+
+          if not decoded:
+              raise SystemExit("Decoded keys file is empty.")
+
+          output = Path(sys.argv[1])
+          output.write_bytes(decoded)
+          output.chmod(0o600)
+
+          print(
+              f"Successfully decoded keys file: "
+              f"{len(decoded):,} bytes"
+          )
+          PY
+
+          test -s "$WORK/prod.keys"
+
+          echo "All downloads and key preparation completed."
+
+      # ================================================
+      # SAVE DOWNLOAD CACHE
+      # Save immediately after successful downloads,
+      # even if a later build step fails.
+      # ================================================
+
+      - name: Save downloaded game files
+        if: success() && steps.download-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/nxnative/download-cache
+          key: ${{ runner.os }}-${{ steps.cache-key.outputs.key }}
+
+      # ================================================
+      # EXTRACT RAR / VALIDATE PACKAGES
+      # ================================================
+
+      - name: Extract RAR archives or accept direct game packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          WORK="$RUNNER_TEMP/nxnative"
+          GAME_DIR="$RUNNER_TEMP/GameFiles"
+
+          mkdir -p "$GAME_DIR"
+
+          python - "$WORK" "$GAME_DIR" <<'PY'
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          work = Path(sys.argv[1])
+          game_dir = Path(sys.argv[2])
+
+          package_extensions = {
+              ".nsp", ".xci", ".nsz", ".xcz"
+          }
+
+          rar_signatures = (
+              b"Rar!\x1a\x07\x00",
+              b"Rar!\x1a\x07\x01\x00",
+          )
+
+          def validate_package(path):
+              with path.open("rb") as f:
+                  magic = f.read(4)
+
+              suffix = path.suffix.lower()
+
+              if suffix in (".nsp", ".nsz") and magic != b"PFS0":
+                  raise SystemExit(
+                      f"Invalid {suffix} package signature: {path.name}"
+                  )
+
+              if suffix in (".xci", ".xcz") and magic != b"HEAD":
+                  raise SystemExit(
+                      f"Invalid {suffix} package signature: {path.name}"
+                  )
+
+          def add_package(source, label):
+              target = game_dir / source.name
+
+              if target.exists():
+                  raise SystemExit(
+                      "Duplicate package filename: " + source.name
+                  )
+
+              validate_package(source)
+              shutil.copy2(source, target)
+
+              print(
+                  f"Added {label}: {target.name} "
+                  f"({target.stat().st_size:,} bytes)"
+              )
+
+          def process_download(label):
+              source = work / f"{label}.download"
+
+              if not source.exists():
+                  print(f"No {label} download; skipping.")
+                  return
+
+              with source.open("rb") as f:
+                  signature = f.read(8)
+
+              is_rar = any(
+                  signature.startswith(magic)
+                  for magic in rar_signatures
+              )
+
+              if is_rar:
+                  extract_dir = work / f"extracted-{label}"
+                  extract_dir.mkdir(parents=True, exist_ok=True)
+
+                  print(f"{label}: RAR archive detected; extracting.")
+
+                  subprocess.run(
+                      [
+                          "unar",
+                          "-o",
+                          str(extract_dir),
+                          str(source),
+                      ],
+                      check=True,
+                  )
+
+                  packages = sorted(
+                      p for p in extract_dir.rglob("*")
+                      if p.is_file()
+                      and p.suffix.lower() in package_extensions
+                  )
+
+                  if not packages:
+                      raise SystemExit(
+                          f"No NSP/XCI/NSZ/XCZ packages found "
+                          f"in the {label} RAR archive."
+                      )
+
+                  for package in packages:
+                      add_package(package, label)
+
+              else:
+                  print(
+                      f"{label}: not a RAR archive; "
+                      "checking as a direct package."
+                  )
+
+                  if signature[:4] == b"PFS0":
+                      extension = ".nsp"
+                  elif signature[:4] == b"HEAD":
+                      extension = ".xci"
+                  else:
+                      raise SystemExit(
+                          f"{label} is not a recognized RAR archive "
+                          "or direct NSP/XCI package."
+                      )
+
+                  target = game_dir / f"{label}{extension}"
+
+                  if target.exists():
+                      raise SystemExit(
+                          f"Output package already exists: {target.name}"
+                      )
+
+                  shutil.copy2(source, target)
+                  validate_package(target)
+
+                  print(
+                      f"Added direct package: {target.name} "
+                      f"({target.stat().st_size:,} bytes)"
+                  )
+
+          process_download("game")
+          process_download("update")
+          process_download("dlc")
+
+          packages = sorted(
+              p for p in game_dir.iterdir()
+              if p.is_file()
+              and p.suffix.lower() in package_extensions
+          )
+
+          if not packages:
+              raise SystemExit("No game packages were prepared.")
+
+          print("\n=== Prepared game packages ===")
+
+          for package in packages:
+              print(f"{package.name}: {package.stat().st_size:,} bytes")
+          PY
+
+          test -s "$WORK/prod.keys"
+
+      # ================================================
+      # DETECT BASE TITLE ID
+      # NxNative performs profile lookup itself. If no
+      # profile exists, it creates a survey and provisional
+      # profile from the supplied NSPs before building.
+      # ================================================
+
+      - name: Detect game title ID and select shader profile
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          GAME_DIR="$RUNNER_TEMP/GameFiles"
+
+          DETECTED_ID="$(python - "$GAME_DIR" <<'PY'
+          import re
+          import struct
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          extensions = {".nsp", ".xci", ".nsz", ".xcz"}
+
+          def pfs0_names(path):
+              try:
+                  with path.open("rb") as f:
+                      header = f.read(16)
+
+                      if len(header) != 16 or header[:4] != b"PFS0":
+                          return []
+
+                      count, string_size = struct.unpack_from(
+                          "<II", header, 4
+                      )
+
+                      if count > 100000 or string_size > 100000000:
+                          return []
+
+                      entries = f.read(count * 0x18)
+                      strings = f.read(string_size)
+
+                      if len(entries) != count * 0x18:
+                          return []
+
+                      names = []
+
+                      for i in range(count):
+                          offset = struct.unpack_from(
+                              "<I", entries, i * 0x18 + 0x10
+                          )[0]
+
+                          if offset >= len(strings):
+                              continue
+
+                          end = strings.find(b"\0", offset)
+
+                          if end < 0:
+                              continue
+
+                          names.append(
+                              strings[offset:end].decode(
+                                  errors="replace"
+                              )
+                          )
+
+                      return names
+
+              except (OSError, struct.error):
+                  return []
+
+          candidates = set()
+
+          for path in root.iterdir():
+              if not path.is_file() or path.suffix.lower() not in extensions:
+                  continue
+
+              for name in pfs0_names(path):
+                  match = re.fullmatch(
+                      r"([0-9A-Fa-f]{16})[0-9A-Fa-f]{16}\.tik",
+                      name,
+                  )
+
+                  if match:
+                      title_id = int(match.group(1), 16)
+
+                      if (title_id & 0xFFF) == 0:
+                          candidates.add(f"{title_id:016X}")
+
+              match = re.search(
+                  r"\[([0-9A-Fa-f]{16})\]",
+                  path.name,
+              )
+
+              if match:
+                  title_id = int(match.group(1), 16)
+
+                  if (title_id & 0xFFF) == 0:
+                      candidates.add(f"{title_id:016X}")
+
+          if len(candidates) != 1:
+              raise SystemExit(
+                  "Could not uniquely identify the base game's title ID. "
+                  f"Candidates found: {sorted(candidates)}. "
+                  "Check the base NSP and its ticket/filename."
+              )
+
+          print(next(iter(candidates)))
+          PY
+          )"
+
+          echo "Detected base title ID: $DETECTED_ID"
+          echo "NxNative will select an existing profile or generate a survey and provisional profile automatically."
+
+          echo "DETECTED_TITLE_ID=$DETECTED_ID" >> "$GITHUB_ENV"
+
       # Apply the exact upstream FINAL FANTASY RESONANCE support commit as a three-way
       # patch on top of the BC-texture fork. This preserves BC-specific texture handling
       # while bringing in the UE 5.6.1 profile, IoStore/Oodle shader extraction, game
       # shader facts, allocator/memory fixes, and the matching rewriter changes.
       - name: Backport FINAL FANTASY RESONANCE support onto BC fallback
-        if: inputs.device == 'iPhone 15 or older (BC fallback)'
+        if: inputs.device == 'iPhone 15 or older (BC fallback)' && env.DETECTED_TITLE_ID == '0100606026F12000'
         shell: bash
         run: |
           set -euo pipefail
@@ -1035,13 +1697,21 @@ jobs:
           git diff --cached --check
           echo "Applied upstream FINAL FANTASY RESONANCE support while retaining the BC fallback."
 
-      # Recognize unframed pointer thunks followed by zero trap padding.
-      # Upstream fix for jump-table assertions on indirect tail calls (Moving Out 2 fix).
-      - name: Backport padded tail-call recognition (BC fallback)
+      # Backport verified SDK-wide memory cuts for BC fallback games.
+      # Exact build-ID cuts already present in the selected profile take precedence;
+      # this matcher only runs for SDK builds without a registered CUTS row.
+      - name: Add verified SDK memory patches (BC fallback)
         if: inputs.device == 'iPhone 15 or older (BC fallback)'
         shell: bash
         run: |
           set -euo pipefail
+
+          UPSTREAM_COMMIT="777a5f6c618a38cd2d7f795f465466fb56920534"
+          RAW="https://raw.githubusercontent.com/seedds/nxnative/$UPSTREAM_COMMIT/dm/tools"
+
+          curl -fsSL "$RAW/nso_code.py" -o dm/tools/nso_code.py
+          curl -fsSL "$RAW/nso_match.py" -o dm/tools/nso_match.py
+          curl -fsSL "$RAW/sdk_patches.py" -o dm/tools/sdk_patches.py
 
           python - <<'PY'
           from pathlib import Path
@@ -1049,652 +1719,32 @@ jobs:
           path = Path("dm/tools/patch_nso.py")
           source = path.read_text()
 
-          marker = "def tail_call(insl, j):"
-          if source.count(marker) != 1:
-              raise SystemExit(
-                  "Could not find exactly one tail_call function; "
-                  "refusing to patch an unknown BC-fallback rewriter."
-              )
+          old = """BUILD_ID = d[0x40:0x50].hex()
+          cuts = list(CUTS.get(BUILD_ID, []))
+          """
 
-          helper = '''def tail_call_padded(insl, j):
-              """An unframed, straight-line pointer thunk ending in br x18 and zero trap padding."""
-              if j + 1 >= len(insl) or any(p.mnemonic != 'udf' or p.op_str != '#0' for p in insl[j + 1:]): return False
-              if any(b.address != a.address + 4 for a, b in zip(insl, insl[1:])): return False
-              for p in insl[:j]:
-                  if p.mnemonic not in ('mov', 'ldr', 'ldrh', 'ldp', 'add', 'str', 'stp'): return False
-                  if {p.reg_name(r) for r in p.regs_access()[1]} & {'sp', 'wsp', 'fp', 'lr', 'x29', 'w29', 'x30', 'w30'}: return False
-              for p in reversed(insl[:j]):
-                  if not {'x18', 'w18'} & {p.reg_name(r) for r in p.regs_access()[1]}: continue
-                  return p.mnemonic in ('ldr', 'ldp') and bool(re.fullmatch(r'x18, (x\\d+, )?\\[(x\\d+|sp)(, #(0x[0-9a-f]+|\\d+))?\\]', p.op_str))
-              return False
+          new = """BUILD_ID = d[0x40:0x50].hex()
+          cuts = list(CUTS.get(BUILD_ID, []))
 
-          '''
-          source = source.replace(marker, helper + marker, 1)
+          # Exact profile cuts take precedence; use fingerprint matching only
+          # for SDK builds without a registered build-ID row.
+          if NAME == 'sdk' and BUILD_ID not in CUTS:
+              import sdk_patches
+              from nso_match import resolve
+              cuts += resolve(IMG, TEXT_END, sdk_patches.MATCH_CUTS.get('sdk', []), red=False)
+          """
 
-          old = "    if j + 1 != len(insl): return False\n"
-          new = "    if j + 1 == len(insl):\n        pass\n    elif tail_call_padded(insl, j):\n        return True\n    else:\n        return False\n"
           if source.count(old) != 1:
               raise SystemExit(
-                  "Could not find the expected terminal-tail check; "
-                  "refusing to patch an unknown tail_call implementation."
-              )
-          source = source.replace(old, new, 1)
-
-          path.write_text(source)
-          compile(source, str(path), "exec")
-          print("Installed guarded recognition for padded, unframed x18 pointer tail calls.")
-          PY
-
-      # Record the actual host GPU exposed to the BC-fallback build.
-      - name: Inspect Mac runner Metal hardware (BC fallback)
-        if: inputs.device == 'iPhone 15 or older (BC fallback)'
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "=== Runner identity ==="
-          uname -a
-          sw_vers
-          echo "=== Display / GPU hardware ==="
-          system_profiler SPDisplaysDataType
-          echo "=== Xcode ==="
-          xcodebuild -version
-
-      # Print the Metal residency-set NSError and device/OS capabilities on BC-fallback builds.
-      # This is diagnostic-only: it preserves the upstream failure behavior and does not bypass it.
-      - name: Add Metal residency-set diagnostics (BC fallback)
-        if: inputs.device == 'iPhone 15 or older (BC fallback)'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path("dm/gfx/nvn/nvn_mtl.m")
-          source = path.read_text()
-
-          old = '''    g_q = [g_dev newCommandQueue];
-              MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new];
-              rd.initialCapacity = 4096;
-              NSError *re = nil;
-              g_res = [g_dev newResidencySetWithDescriptor:rd error:&re];
-              if (!g_res) MDIE("failed to create the MTLResidencySet");
-          '''
-
-          new = '''    MLOG("Metal device: %s; registryID=%llu; unifiedMemory=%d; maxBufferLength=%llu; recommendedMaxWorkingSetSize=%llu; OS=%s",
-              g_dev.name.UTF8String,
-              (unsigned long long)g_dev.registryID,
-              g_dev.hasUnifiedMemory,
-              (unsigned long long)g_dev.maxBufferLength,
-              (unsigned long long)g_dev.recommendedMaxWorkingSetSize,
-              NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String);
-              g_q = [g_dev newCommandQueue];
-              MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new];
-              rd.initialCapacity = 4096;
-              NSError *re = nil;
-              g_res = [g_dev newResidencySetWithDescriptor:rd error:&re];
-              if (!g_res) {
-                  MLOG("FATAL failed to create the MTLResidencySet");
-                  if (re) {
-                      MLOG("Metal residency-set NSError: domain=%s code=%ld description=%s userInfo=%s",
-                           re.domain.UTF8String, (long)re.code,
-                           re.localizedDescription.UTF8String,
-                           re.userInfo.description.UTF8String);
-                  } else {
-                      MLOG("Metal residency-set NSError was nil");
-                  }
-                  abort();
-              }
-          '''
-          if old not in source:
-              raise SystemExit(
-                  "Could not find the expected Metal residency-set initialization block; "
-                  "refusing to patch an unknown NxNative source version."
+                  "Could not find the expected SDK cut block in patch_nso.py; "
+                  "refusing to patch an unknown BC-fallback source version."
               )
 
           path.write_text(source.replace(old, new, 1))
-          print("Added Metal device/OS and residency-set NSError diagnostics.")
+          compile(path.read_text(), str(path), "exec")
+          print("Installed verified SDK matching; registered exact build cuts remain authoritative.")
           PY
 
-      # ================================================
-      # ENVIRONMENT
-      # ================================================
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Set up .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "10.0.x"
-
-      - name: Install dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          brew install xcodegen zstd spirv-cross unar
-
-          python -m pip install --upgrade pip
-
-          python -m pip install \
-            lz4 'capstone>=5,<6' fonttools backports.zstd
-
-      # ================================================
-      # DOWNLOAD CACHE KEY
-      # ================================================
-
-      - name: Prepare download cache
-        id: cache-key
-        env:
-          GAME_URL: ${{ secrets.Game_URL }}
-          UPDATE_URL: ${{ secrets.Update_URL }}
-          DLC_URL: ${{ secrets.DLC_URL }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python - <<'PY'
-          import hashlib
-          import os
-
-          urls = [
-              os.environ.get("GAME_URL", "").strip(),
-              os.environ.get("UPDATE_URL", "").strip(),
-              os.environ.get("DLC_URL", "").strip(),
-          ]
-
-          if not urls[0]:
-              raise SystemExit("Game_URL secret is empty.")
-
-          cache_key = hashlib.sha256(
-              "|".join(urls).encode()
-          ).hexdigest()
-
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"key=nxnative-downloads-{cache_key}\n")
-
-          print("Download cache key prepared.")
-          PY
-
-          mkdir -p "$RUNNER_TEMP/nxnative/download-cache"
-
-      - name: Restore downloaded game files
-        id: download-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ runner.temp }}/nxnative/download-cache
-          key: ${{ runner.os }}-${{ steps.cache-key.outputs.key }}
-
-      # ================================================
-      # DOWNLOAD GAME / UPDATE / DLC
-      # DECODE BASE64 KEYS
-      # ================================================
-
-      - name: Download game files and decode keys
-        env:
-          GAME_URL: ${{ secrets.Game_URL }}
-          UPDATE_URL: ${{ secrets.Update_URL }}
-          DLC_URL: ${{ secrets.DLC_URL }}
-          KEYS_BASE64: ${{ secrets.Keys_URL }}
-          CONTENT_SELECTION: ${{ inputs.content }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          WORK="$RUNNER_TEMP/nxnative"
-          CACHE="$WORK/download-cache"
-
-          mkdir -p "$WORK" "$CACHE"
-
-          download_file() {
-            local url="$1"
-            local output="$2"
-            local filename
-            local cached
-            local temporary
-
-            filename="$(basename "$output")"
-            cached="$CACHE/$filename"
-            temporary="$output.part"
-
-            if [[ -z "${url:-}" ]]; then
-              echo "::error::Download URL is empty."
-              exit 1
-            fi
-
-            # Reuse cached downloads.
-            if [[ -s "$cached" ]]; then
-              echo "========================================"
-              echo "CACHE HIT: $filename"
-              echo "Reusing cached download."
-              echo "========================================"
-
-              cp "$cached" "$output"
-              file "$output"
-              return
-            fi
-
-            echo "========================================"
-            echo "CACHE MISS: $filename"
-            echo "Starting direct download..."
-            echo "========================================"
-
-            # Direct HTTP/HTTPS download with percentage progress.
-            curl \
-              --fail \
-              --location \
-              --show-error \
-              --progress-bar \
-              --retry 3 \
-              --retry-delay 5 \
-              --connect-timeout 30 \
-              --output "$temporary" \
-              "$url"
-
-            if [[ ! -s "$temporary" ]]; then
-              echo "::error::Downloaded file is empty."
-              exit 1
-            fi
-
-            mv "$temporary" "$output"
-
-            echo "Download completed:"
-            ls -lh "$output"
-            file "$output"
-
-            # Cache successful downloads.
-            cp "$output" "$cached"
-
-            echo "Saved $filename to download cache."
-          }
-
-          # Base game is required.
-          download_file "$GAME_URL" "$WORK/game.download"
-
-          # Include only the content selected at workflow dispatch.
-          # The cache key still uses all three URLs, so existing cached
-          # game/update/DLC downloads remain available across these choices.
-          case "${CONTENT_SELECTION:-}" in
-            "Base game only")
-              INCLUDE_UPDATE=false
-              INCLUDE_DLC=false
-              ;;
-            "Base game + update (no DLC)")
-              INCLUDE_UPDATE=true
-              INCLUDE_DLC=false
-              ;;
-            "Base game + DLC (no update)")
-              INCLUDE_UPDATE=false
-              INCLUDE_DLC=true
-              ;;
-            "Base game + update + DLC")
-              INCLUDE_UPDATE=true
-              INCLUDE_DLC=true
-              ;;
-            *)
-              echo "::error::Unknown content selection: ${CONTENT_SELECTION:-unset}"
-              exit 1
-              ;;
-          esac
-
-          if [[ "$INCLUDE_UPDATE" == true ]]; then
-            if [[ -z "${UPDATE_URL:-}" ]]; then
-              echo "::error::Update was selected, but UPDATE_URL is not configured."
-              exit 1
-            fi
-            download_file "$UPDATE_URL" "$WORK/update.download"
-          else
-            echo "Update excluded by content selection; skipping."
-          fi
-
-          if [[ "$INCLUDE_DLC" == true ]]; then
-            if [[ -z "${DLC_URL:-}" ]]; then
-              echo "::error::DLC was selected, but DLC_URL is not configured."
-              exit 1
-            fi
-            download_file "$DLC_URL" "$WORK/dlc.download"
-          else
-            echo "DLC excluded by content selection; skipping."
-          fi
-
-          # Decode Base64 encryption keys.
-          if [[ -z "${KEYS_BASE64:-}" ]]; then
-            echo "::error::Keys_URL secret is empty."
-            exit 1
-          fi
-
-          echo "Decoding Base64 encryption keys..."
-
-          python - "$WORK/prod.keys" <<'PY'
-          import base64
-          import os
-          import re
-          import sys
-          from pathlib import Path
-
-          encoded = os.environ["KEYS_BASE64"].strip()
-
-          encoded = re.sub(r"\s+", "", encoded)
-
-          try:
-              decoded = base64.b64decode(
-                  encoded,
-                  validate=True
-              )
-          except Exception as exc:
-              raise SystemExit(
-                  f"Invalid Base64 encryption keys: {exc}"
-              )
-
-          if not decoded:
-              raise SystemExit("Decoded keys file is empty.")
-
-          output = Path(sys.argv[1])
-          output.write_bytes(decoded)
-          output.chmod(0o600)
-
-          print(
-              f"Successfully decoded keys file: "
-              f"{len(decoded):,} bytes"
-          )
-          PY
-
-          test -s "$WORK/prod.keys"
-
-          echo "All downloads and key preparation completed."
-
-      # ================================================
-      # SAVE DOWNLOAD CACHE
-      # Save immediately after successful downloads,
-      # even if a later build step fails.
-      # ================================================
-
-      - name: Save downloaded game files
-        if: success() && steps.download-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/nxnative/download-cache
-          key: ${{ runner.os }}-${{ steps.cache-key.outputs.key }}
-
-      # ================================================
-      # EXTRACT RAR / VALIDATE PACKAGES
-      # ================================================
-
-      - name: Extract RAR archives or accept direct game packages
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          WORK="$RUNNER_TEMP/nxnative"
-          GAME_DIR="$RUNNER_TEMP/GameFiles"
-
-          mkdir -p "$GAME_DIR"
-
-          python - "$WORK" "$GAME_DIR" <<'PY'
-          import shutil
-          import subprocess
-          import sys
-          from pathlib import Path
-
-          work = Path(sys.argv[1])
-          game_dir = Path(sys.argv[2])
-
-          package_extensions = {
-              ".nsp", ".xci", ".nsz", ".xcz"
-          }
-
-          rar_signatures = (
-              b"Rar!\x1a\x07\x00",
-              b"Rar!\x1a\x07\x01\x00",
-          )
-
-          def validate_package(path):
-              with path.open("rb") as f:
-                  magic = f.read(4)
-
-              suffix = path.suffix.lower()
-
-              if suffix in (".nsp", ".nsz") and magic != b"PFS0":
-                  raise SystemExit(
-                      f"Invalid {suffix} package signature: {path.name}"
-                  )
-
-              if suffix in (".xci", ".xcz") and magic != b"HEAD":
-                  raise SystemExit(
-                      f"Invalid {suffix} package signature: {path.name}"
-                  )
-
-          def add_package(source, label):
-              target = game_dir / source.name
-
-              if target.exists():
-                  raise SystemExit(
-                      "Duplicate package filename: " + source.name
-                  )
-
-              validate_package(source)
-              shutil.copy2(source, target)
-
-              print(
-                  f"Added {label}: {target.name} "
-                  f"({target.stat().st_size:,} bytes)"
-              )
-
-          def process_download(label):
-              source = work / f"{label}.download"
-
-              if not source.exists():
-                  print(f"No {label} download; skipping.")
-                  return
-
-              with source.open("rb") as f:
-                  signature = f.read(8)
-
-              is_rar = any(
-                  signature.startswith(magic)
-                  for magic in rar_signatures
-              )
-
-              if is_rar:
-                  extract_dir = work / f"extracted-{label}"
-                  extract_dir.mkdir(parents=True, exist_ok=True)
-
-                  print(f"{label}: RAR archive detected; extracting.")
-
-                  subprocess.run(
-                      [
-                          "unar",
-                          "-o",
-                          str(extract_dir),
-                          str(source),
-                      ],
-                      check=True,
-                  )
-
-                  packages = sorted(
-                      p for p in extract_dir.rglob("*")
-                      if p.is_file()
-                      and p.suffix.lower() in package_extensions
-                  )
-
-                  if not packages:
-                      raise SystemExit(
-                          f"No NSP/XCI/NSZ/XCZ packages found "
-                          f"in the {label} RAR archive."
-                      )
-
-                  for package in packages:
-                      add_package(package, label)
-
-              else:
-                  print(
-                      f"{label}: not a RAR archive; "
-                      "checking as a direct package."
-                  )
-
-                  if signature[:4] == b"PFS0":
-                      extension = ".nsp"
-                  elif signature[:4] == b"HEAD":
-                      extension = ".xci"
-                  else:
-                      raise SystemExit(
-                          f"{label} is not a recognized RAR archive "
-                          "or direct NSP/XCI package."
-                      )
-
-                  target = game_dir / f"{label}{extension}"
-
-                  if target.exists():
-                      raise SystemExit(
-                          f"Output package already exists: {target.name}"
-                      )
-
-                  shutil.copy2(source, target)
-                  validate_package(target)
-
-                  print(
-                      f"Added direct package: {target.name} "
-                      f"({target.stat().st_size:,} bytes)"
-                  )
-
-          process_download("game")
-          process_download("update")
-          process_download("dlc")
-
-          packages = sorted(
-              p for p in game_dir.iterdir()
-              if p.is_file()
-              and p.suffix.lower() in package_extensions
-          )
-
-          if not packages:
-              raise SystemExit("No game packages were prepared.")
-
-          print("\n=== Prepared game packages ===")
-
-          for package in packages:
-              print(f"{package.name}: {package.stat().st_size:,} bytes")
-          PY
-
-          test -s "$WORK/prod.keys"
-
-      # ================================================
-      # DETECT BASE TITLE ID
-      # NxNative performs profile lookup itself. If no
-      # profile exists, it creates a survey and provisional
-      # profile from the supplied NSPs before building.
-      # ================================================
-
-      - name: Detect game title ID and select shader profile
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          GAME_DIR="$RUNNER_TEMP/GameFiles"
-
-          DETECTED_ID="$(python - "$GAME_DIR" <<'PY'
-          import re
-          import struct
-          import sys
-          from pathlib import Path
-
-          root = Path(sys.argv[1])
-          extensions = {".nsp", ".xci", ".nsz", ".xcz"}
-
-          def pfs0_names(path):
-              try:
-                  with path.open("rb") as f:
-                      header = f.read(16)
-
-                      if len(header) != 16 or header[:4] != b"PFS0":
-                          return []
-
-                      count, string_size = struct.unpack_from(
-                          "<II", header, 4
-                      )
-
-                      if count > 100000 or string_size > 100000000:
-                          return []
-
-                      entries = f.read(count * 0x18)
-                      strings = f.read(string_size)
-
-                      if len(entries) != count * 0x18:
-                          return []
-
-                      names = []
-
-                      for i in range(count):
-                          offset = struct.unpack_from(
-                              "<I", entries, i * 0x18 + 0x10
-                          )[0]
-
-                          if offset >= len(strings):
-                              continue
-
-                          end = strings.find(b"\0", offset)
-
-                          if end < 0:
-                              continue
-
-                          names.append(
-                              strings[offset:end].decode(
-                                  errors="replace"
-                              )
-                          )
-
-                      return names
-
-              except (OSError, struct.error):
-                  return []
-
-          candidates = set()
-
-          for path in root.iterdir():
-              if not path.is_file() or path.suffix.lower() not in extensions:
-                  continue
-
-              for name in pfs0_names(path):
-                  match = re.fullmatch(
-                      r"([0-9A-Fa-f]{16})[0-9A-Fa-f]{16}\.tik",
-                      name,
-                  )
-
-                  if match:
-                      title_id = int(match.group(1), 16)
-
-                      if (title_id & 0xFFF) == 0:
-                          candidates.add(f"{title_id:016X}")
-
-              match = re.search(
-                  r"\[([0-9A-Fa-f]{16})\]",
-                  path.name,
-              )
-
-              if match:
-                  title_id = int(match.group(1), 16)
-
-                  if (title_id & 0xFFF) == 0:
-                      candidates.add(f"{title_id:016X}")
-
-          if len(candidates) != 1:
-              raise SystemExit(
-                  "Could not uniquely identify the base game's title ID. "
-                  f"Candidates found: {sorted(candidates)}. "
-                  "Check the base NSP and its ticket/filename."
-              )
-
-          print(next(iter(candidates)))
-          PY
-          )"
-
-          echo "Detected base title ID: $DETECTED_ID"
-          echo "NxNative will select an existing profile or generate a survey and provisional profile automatically."
-
-          echo "DETECTED_TITLE_ID=$DETECTED_ID" >> "$GITHUB_ENV"
 
       # ================================================
       # MATCH THE SHADER TOOL LOCK TO THIS RUNNER
