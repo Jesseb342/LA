@@ -635,7 +635,7 @@ jobs:
       # Backport upstream's verified SDK address-space patches into the older BC-texture fork.
       # The matcher fingerprints complete SDK functions and asserts original bytes before applying cuts.
       - name: Add verified SDK memory patches (BC fallback)
-        if: inputs.device == 'iPhone 15 or older (BC fallback)'
+        if: inputs.device == 'iPhone 15 or older (BC fallback)' && env.DETECTED_TITLE_ID != '0100606026F12000'
         shell: bash
         run: |
           set -euo pipefail
