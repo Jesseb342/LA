@@ -740,7 +740,14 @@ jobs:
           test -f dm/games/0100606026F12000/game.tsv
           test -f dm/gfx/tools/uepak.py
           test -f dm/games/0100606026F12000/shader_facts_manual.tsv
-          grep -q '^title_id[[:space:]]0100606026F12000      - name: Backport padded tail-call recognition (BC fallback)
+          grep -q 'title_id[[:space:]]0100606026F12000' dm/games/0100606026F12000/game.tsv
+          python -m py_compile dm/gfx/tools/uepak.py dm/tools/patch_nso.py scripts/build_ipa_from_nsp.py
+          git diff --cached --check
+          echo "Applied upstream FINAL FANTASY RESONANCE support while retaining the BC fallback."
+
+      # Recognize unframed pointer thunks followed by zero trap padding.
+      # Upstream fix for jump-table assertions on indirect tail calls (Moving Out 2 fix).
+      - name: Backport padded tail-call recognition (BC fallback)
         if: inputs.device == 'iPhone 15 or older (BC fallback)'
         shell: bash
         run: |
