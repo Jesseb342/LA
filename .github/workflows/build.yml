@@ -727,29 +727,27 @@ jobs:
           from pathlib import Path
 
           path = Path("dm/gfx/tools/shader_split.py")
-          source = path.read_text()
+          lines = path.read_text().splitlines(keepends=True)
 
-          old = """                    for i, u in enumerate(k['uniqueVariants']):
-                        where = f'{base}#{o["m_Name"]}#{k["name"]}.{i}'
-                        out.extend((where, st, ctl, cd) for st, ctl, cd in unity_program(u['code'], where, 'cs'))
-          """
-
-          new = """                    unique_variants = k.get('uniqueVariants')
-                    if unique_variants is None:
-                        print(f'[YELLOW] {base}#{o.get("m_Name", "?")}#{k.get("name", "?")}: ComputeShader kernel has no uniqueVariants field; skipping this kernel', flush=True)
-                        continue
-                    for i, u in enumerate(unique_variants):
-                        where = f'{base}#{o["m_Name"]}#{k["name"]}.{i}'
-                        out.extend((where, st, ctl, cd) for st, ctl, cd in unity_program(u['code'], where, 'cs'))
-          """
-
-          if old not in source:
+          target = "for i, u in enumerate(k['uniqueVariants']):"
+          matches = [i for i, line in enumerate(lines) if line.strip() == target]
+          if len(matches) != 1:
               raise SystemExit(
-                  "Could not find the expected unity_compute uniqueVariants loop; "
+                  f"Expected exactly one uniqueVariants loop, found {len(matches)}; "
                   "refusing to patch an unknown shader_split.py version."
               )
 
-          path.write_text(source.replace(old, new, 1))
+          i = matches[0]
+          indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+          lines[i] = (
+              indent + "unique_variants = k.get('uniqueVariants')\n"
+              + indent + "if unique_variants is None:\n"
+              + indent + "    print(f'[YELLOW] {base}#{o.get(\"m_Name\", \"?\")}#{k.get(\"name\", \"?\")}: ComputeShader kernel has no uniqueVariants field; skipping this kernel', flush=True)\n"
+              + indent + "    continue\n"
+              + indent + "for i, u in enumerate(unique_variants):\n"
+          )
+
+          path.write_text("".join(lines))
           print("Patched Unity compute shader scanning to skip kernels without uniqueVariants.")
           PY
 
