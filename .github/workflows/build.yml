@@ -101,6 +101,56 @@ jobs:
           print("Installed verified upstream SDK function-matching patches for BC fallback.")
           PY
 
+      # Recognize unframed pointer thunks followed by zero trap padding.
+      # Upstream fix for jump-table assertions on indirect tail calls (Moving Out 2 fix).
+      - name: Backport padded tail-call recognition (BC fallback)
+        if: inputs.device == 'iPhone 15 or older (BC fallback)'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("dm/tools/patch_nso.py")
+          source = path.read_text()
+
+          marker = "def tail_call(insl, j):"
+          if source.count(marker) != 1:
+              raise SystemExit(
+                  "Could not find exactly one tail_call function; "
+                  "refusing to patch an unknown BC-fallback rewriter."
+              )
+
+          helper = '''def tail_call_padded(insl, j):
+              """An unframed, straight-line pointer thunk ending in br x18 and zero trap padding."""
+              if j + 1 >= len(insl) or any(p.mnemonic != 'udf' or p.op_str != '#0' for p in insl[j + 1:]): return False
+              if any(b.address != a.address + 4 for a, b in zip(insl, insl[1:])): return False
+              for p in insl[:j]:
+                  if p.mnemonic not in ('mov', 'ldr', 'ldrh', 'ldp', 'add', 'str', 'stp'): return False
+                  if {p.reg_name(r) for r in p.regs_access()[1]} & {'sp', 'wsp', 'fp', 'lr', 'x29', 'w29', 'x30', 'w30'}: return False
+              for p in reversed(insl[:j]):
+                  if not {'x18', 'w18'} & {p.reg_name(r) for r in p.regs_access()[1]}: continue
+                  return p.mnemonic in ('ldr', 'ldp') and bool(re.fullmatch(r'x18, (x\\d+, )?\\[(x\\d+|sp)(, #(0x[0-9a-f]+|\\d+))?\\]', p.op_str))
+              return False
+
+          '''
+          source = source.replace(marker, helper + marker, 1)
+
+          old = "    if j + 1 != len(insl): return False\n"
+          new = "    if j + 1 == len(insl):\n        pass\n    elif tail_call_padded(insl, j):\n        return True\n    else:\n        return False\n"
+          if source.count(old) != 1:
+              raise SystemExit(
+                  "Could not find the expected terminal-tail check; "
+                  "refusing to patch an unknown tail_call implementation."
+              )
+          source = source.replace(old, new, 1)
+
+          path.write_text(source)
+          compile(source, str(path), "exec")
+          print("Installed guarded recognition for padded, unframed x18 pointer tail calls.")
+          PY
+
       # Record the actual host GPU exposed to the BC-fallback build.
       - name: Inspect Mac runner Metal hardware (BC fallback)
         if: inputs.device == 'iPhone 15 or older (BC fallback)'
